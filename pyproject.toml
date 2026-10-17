@@ -1,15 +1,40 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmsrt"
 version = "0.1.0"
 description = "Extract video subtitles and translate them into one multilingual SRT."
-license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ivershuo" }]
+keywords = [
+    "subtitles", "subtitle-translation", "srt", "bilingual", "translation",
+    "llm", "openai", "deepseek", "glm", "ffmpeg", "whisper", "imdb", "douban",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Text Processing :: Linguistic",
+]
 dynamic = ["dependencies", "optional-dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/ivershuo/llmsrt"
+Source = "https://github.com/ivershuo/llmsrt"
+Issues = "https://github.com/ivershuo/llmsrt/issues"
+Changelog = "https://github.com/ivershuo/llmsrt/releases"
 
 [project.scripts]
 llmsrt = "llmsrt:main"
