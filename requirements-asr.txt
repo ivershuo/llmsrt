@@ -1,0 +1,2 @@
+# Optional local speech recognition. Install base requirements separately.
+faster-whisper>=1.1,<2

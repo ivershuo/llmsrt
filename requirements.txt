@@ -1,0 +1,6 @@
+# Linux / Python 3.10+. LLM calls use the Python standard library (urllib).
+beautifulsoup4>=4.12,<5
+srt>=3.5,<4
+pycountry>=23.12
+langid>=1.1.6,<2
+opencc-python-reimplemented>=0.1.7,<1

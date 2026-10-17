@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmsrt"
+version = "0.1.0"
+description = "Extract video subtitles and translate them into one multilingual SRT."
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["dependencies", "optional-dependencies"]
+
+[project.scripts]
+llmsrt = "llmsrt:main"
+
+[tool.setuptools]
+py-modules = ["llmsrt", "media_metadata"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.dynamic.optional-dependencies]
+asr = {file = ["requirements-asr.txt"]}

@@ -1,0 +1,29 @@
+# Python 构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境与工具缓存
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 本地配置与密钥
+.env
+config.local.json
+
+# 运行时临时文件与日志
+.llmsrt-*.tmp
+*.log
+
+# 编辑器与系统文件
+.DS_Store
+.idea/
+.vscode/
