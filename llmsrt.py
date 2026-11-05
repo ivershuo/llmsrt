@@ -784,6 +784,13 @@ class LLMTranslator:
         return output
 
 
+def current_umask() -> int:
+    # os has no read-only umask probe; restore immediately after sampling it.
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 def write_srt(destination: Path, cues: list[Any], *, overwrite: bool) -> None:
     srt = dependency("srt")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -798,6 +805,9 @@ def write_srt(destination: Path, cues: list[Any], *, overwrite: bool) -> None:
             file.write(srt.compose(cues, reindex=False))
             file.flush()
             os.fsync(file.fileno())
+        # NamedTemporaryFile creates 0600; chmod to what a direct write would get
+        # under the current umask so NAS shares and media servers can read it.
+        os.chmod(temporary, 0o666 & ~current_umask())
         if overwrite:
             os.replace(temporary, destination)
         else:
