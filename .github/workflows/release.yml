@@ -40,6 +40,7 @@ jobs:
             echo "missing=false" >> "$GITHUB_OUTPUT"
           else
             echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
   build:
     needs: release
     if: needs.release.outputs.pypi_missing == 'true'
