@@ -40,6 +40,9 @@ pipx install llmsrt
 
 ```bash
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
+# 带语音识别可选依赖：
+python3 -m pip install --user "llmsrt[asr] @ git+https://github.com/ivershuo/llmsrt.git"
+# 或用 pipx 安装为独立工具：
 pipx install git+https://github.com/ivershuo/llmsrt.git
 ```
 

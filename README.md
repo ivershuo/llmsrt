@@ -44,6 +44,9 @@ To run development state newer than the latest PyPI release, pip and pipx can in
 
 ```bash
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
+# With the optional speech-recognition extras:
+python3 -m pip install --user "llmsrt[asr] @ git+https://github.com/ivershuo/llmsrt.git"
+# Or as an isolated pipx tool:
 pipx install git+https://github.com/ivershuo/llmsrt.git
 ```
 
