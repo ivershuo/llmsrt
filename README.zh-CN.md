@@ -24,24 +24,28 @@
 ```bash
 sudo apt-get update
 sudo apt-get install -y ffmpeg python3 python3-pip
-
-cd /path/to/llmsrt
-python3 -m pip install --user .
 ```
 
-也可以不克隆源码，pip 和 pipx 直接从 GitHub 仓库安装：
+然后从 [PyPI](https://pypi.org/project/llmsrt/) 安装，无需克隆源码：
+
+```bash
+python3 -m pip install --user llmsrt
+# 带语音识别可选依赖：
+python3 -m pip install --user 'llmsrt[asr]'
+# 或用 pipx 安装为独立工具：
+pipx install llmsrt
+```
+
+想运行比 PyPI 版本更新的开发中代码时，pip 和 pipx 也可以直接从 GitHub 仓库安装：
 
 ```bash
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
-# 带语音识别可选依赖：
-python3 -m pip install --user "llmsrt[asr] @ git+https://github.com/ivershuo/llmsrt.git"
-# 或用 pipx 安装为独立工具：
 pipx install git+https://github.com/ivershuo/llmsrt.git
 ```
 
-从 Git 安装需要 PATH 中有 `git`，包在本机现场构建；依赖仍从 PyPI 下载。在 URL 后加 `@v0.1.0` 可固定某个发布标签；升级时同一命令加 `--upgrade` 重新执行即可。
+从 Git 安装需要 PATH 中有 `git`，包在本机现场构建；依赖仍从 PyPI 下载。在 URL 后加 `@v0.1.1` 可固定某个发布标签；升级时同一命令加 `--upgrade` 重新执行即可。已克隆源码时，`cd /path/to/llmsrt && python3 -m pip install --user .` 依然可用。
 
-pip 将程序和依赖装到当前用户的 Python 安装目录，自动生成 `llmsrt` 命令。**不创建运行用的虚拟环境，不需要每次 SSH 后执行 `source activate`。** Python 依赖会与这个用户的其他 Python 项目共享。如果当前仍激活着旧 `.venv`，先执行一次 `deactivate`；也可以通过 `/usr/bin/python3 -m pip install --user .` 指定解释器。
+pip 将程序和依赖装到当前用户的 Python 安装目录，自动生成 `llmsrt` 命令。**不创建运行用的虚拟环境，不需要每次 SSH 后执行 `source activate`。** Python 依赖会与这个用户的其他 Python 项目共享。如果当前仍激活着旧 `.venv`，先执行一次 `deactivate`；也可以通过 `/usr/bin/python3 -m pip install --user llmsrt` 指定解释器。
 
 Linux 的默认命令目录通常是 `~/.local/bin`。若它不在 PATH 中，在当前终端执行：
 
@@ -67,21 +71,20 @@ llmsrt --targets en,zh-cn      # 合并输出，英文在上
 
 ```bash
 sudo apt-get install -y pipx
-cd /path/to/llmsrt
-pipx install .
+pipx install llmsrt
 pipx ensurepath
 # 按 ensurepath 的提示重新登录 SSH，让 PATH 生效；然后直接运行 llmsrt
 ```
 
-使用 pipx 安装后，源码更新可执行 `pipx install --force /path/to/llmsrt`；卸载用 `pipx uninstall llmsrt`。选择用户级 pip 或 pipx 中的一种安装方式即可。
+使用 pipx 安装后，升级用 `pipx upgrade llmsrt`（从源码强制重装用 `pipx install --force /path/to/llmsrt`）；卸载用 `pipx uninstall llmsrt`。选择用户级 pip 或 pipx 中的一种安装方式即可。
 
 大模型请求使用 Python 标准库 `urllib`，不用安装三个不同的 SDK。默认只处理内嵌和外挂文本字幕，不需要 GPU、faster-whisper 或识别模型，也不会自动下载识别模型。没有可用文本字幕时，该视频报告错误；目录批处理继续处理其他视频。
 
 需要语音识别后备方案时，在目标 Linux 环境安装可选依赖，再显式开启：
 
 ```bash
-# 回到源码目录，用户级安装额外依赖
-python3 -m pip install --user '.[asr]'
+# 用户级安装额外依赖
+python3 -m pip install --user 'llmsrt[asr]'
 # 如果使用 pipx 安装，改用：pipx inject llmsrt 'faster-whisper>=1.1,<2'
 llmsrt /data/movie.mkv --asr
 ```

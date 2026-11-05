@@ -28,24 +28,28 @@ sudo apt-get install -y ffmpeg python3 python3-pip
 
 # macOS
 brew install ffmpeg python
-
-cd /path/to/llmsrt
-python3 -m pip install --user .
 ```
 
-No clone is even needed — pip and pipx can install straight from this GitHub repository:
+Then install the package from [PyPI](https://pypi.org/project/llmsrt/) — no clone is needed:
+
+```bash
+python3 -m pip install --user llmsrt
+# With the optional speech-recognition extras:
+python3 -m pip install --user 'llmsrt[asr]'
+# Or as an isolated pipx tool:
+pipx install llmsrt
+```
+
+To run development state newer than the latest PyPI release, pip and pipx can install straight from this GitHub repository:
 
 ```bash
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
-# With the optional speech-recognition extras:
-python3 -m pip install --user "llmsrt[asr] @ git+https://github.com/ivershuo/llmsrt.git"
-# Or as an isolated pipx tool:
 pipx install git+https://github.com/ivershuo/llmsrt.git
 ```
 
-Git-based installs need `git` in PATH and build the package locally; dependencies still come from PyPI. Append `@v0.1.0` to the URL to pin a release tag, and re-run the same command with `--upgrade` to move to a newer revision.
+Git-based installs need `git` in PATH and build the package locally; dependencies still come from PyPI. Append `@v0.1.1` to the URL to pin a release tag, and re-run the same command with `--upgrade` to move to a newer revision. From a clone, `cd /path/to/llmsrt && python3 -m pip install --user .` works as before.
 
-pip installs the program and its dependencies into the current user's Python directory and generates the `llmsrt` command. **No virtual environment is created for running it, and no `source activate` is needed after every SSH login.** Python dependencies are shared with the user's other Python projects. If an old `.venv` is still active, run `deactivate` once; `/usr/bin/python3 -m pip install --user .` selects a specific interpreter.
+pip installs the program and its dependencies into the current user's Python directory and generates the `llmsrt` command. **No virtual environment is created for running it, and no `source activate` is needed after every SSH login.** Python dependencies are shared with the user's other Python projects. If an old `.venv` is still active, run `deactivate` once; `/usr/bin/python3 -m pip install --user llmsrt` selects a specific interpreter.
 
 On Linux the default command directory is `~/.local/bin`. If it is not in PATH, run in the current shell:
 
@@ -71,21 +75,20 @@ If pip reports `externally-managed-environment`, your distribution restricts the
 
 ```bash
 sudo apt-get install -y pipx
-cd /path/to/llmsrt
-pipx install .
+pipx install llmsrt
 pipx ensurepath
 # Re-login as ensurepath suggests so PATH takes effect, then just run llmsrt
 ```
 
-With pipx, source updates use `pipx install --force /path/to/llmsrt`; uninstall with `pipx uninstall llmsrt`. Pick either the user-level pip install or pipx, not both.
+With pipx, upgrades use `pipx upgrade llmsrt` (or `pipx install --force /path/to/llmsrt` from a clone); uninstall with `pipx uninstall llmsrt`. Pick either the user-level pip install or pipx, not both.
 
 LLM requests use the Python standard library `urllib`, so no per-provider SDKs are installed. By default only embedded and sidecar text subtitles are processed — no GPU, faster-whisper or recognition models are needed, and nothing is downloaded automatically. A video without usable text subtitles reports an error; batch processing continues with the other videos.
 
 For the speech-recognition fallback, install the optional dependencies on the target machine, then enable it explicitly:
 
 ```bash
-# From the source directory, install extra dependencies at user level
-python3 -m pip install --user '.[asr]'
+# Install the optional extra dependencies at user level
+python3 -m pip install --user 'llmsrt[asr]'
 # If installed with pipx, use: pipx inject llmsrt 'faster-whisper>=1.1,<2'
 llmsrt /data/movie.mkv --asr
 ```
