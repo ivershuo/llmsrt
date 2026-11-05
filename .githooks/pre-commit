@@ -1,0 +1,9 @@
+#!/bin/sh
+# Lint GitHub Actions workflows before committing.
+# Install once with: git config core.hooksPath .githooks
+# Requires actionlint (brew install actionlint / go install github.com/rhysd/actionlint/cmd/actionlint@latest).
+if command -v actionlint >/dev/null 2>&1; then
+  actionlint
+else
+  echo "pre-commit: actionlint not found, skipping workflow lint (CI will still check)" >&2
+fi

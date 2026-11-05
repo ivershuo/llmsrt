@@ -1,5 +1,7 @@
 # llmsrt
 
+[![PyPI](https://img.shields.io/pypi/v/llmsrt)](https://pypi.org/project/llmsrt/)
+
 [English](README.md) | **简体中文**
 
 用于 Linux 的 Python 视频字幕提取与大模型翻译脚本。支持指定视频文件或目录，默认扫描当前目录；默认生成**一份简体中文在上、英文在下的 SRT**，不按语言拆成多个文件。
@@ -93,8 +95,6 @@ llmsrt /data/movie.mkv --asr
 ```
 
 `--asr` 仅在找不到可用文本字幕时使用语音识别。`--asr-model`、`--audio-stream` 等识别参数不会自动开启识别；`--no-asr` 仍可显式关闭。
-
-按需求，开发期间**没有在当前环境执行脚本、安装依赖、发起 API 请求或运行测试验证**；实际运行情况需在目标 Linux 环境确认。
 
 ### 在不同目录共用配置
 
@@ -211,7 +211,7 @@ python llmsrt.py /data/movie.mkv --no-metadata --title '作品名称'
 
 影片资料和搜索候选缓存位于 `~/.cache/llmsrt/media/`，跟随 `--cache-dir`，默认有效 30 天。`--metadata-cache-days` 调整有效期，`--metadata-refresh` 忽略已有磁盘缓存；同一次批量运行会复用搜索和详情结果，单次运行已失败的同一查询也不会反复请求。`--offline` 只读取影片缓存，可以使用过期缓存，不访问任何影片网站；缺少资料时降级为手动背景或文件名线索。
 
-公开页面和搜索建议接口可能因 403、429、登录、访问验证、网络超时或页面结构变化而不可用。这是尽力获取，不是稳定的官方 API；不尝试绕过访问验证，失败会警告并继续字幕翻译。已指定 ID 可以避免搜索歧义，但不能保证页面一定可访问。IMDb 的公开资料和豆瓣详情页示例见 [IMDb](https://www.imdb.com/title/tt0816692/) 与 [豆瓣](https://movie.douban.com/subject/1889243/)；抓取与解析模块为 `media_metadata.py`。当前环境没有执行这些查询代码或验证真实抓取效果。
+公开页面和搜索建议接口可能因 403、429、登录、访问验证、网络超时或页面结构变化而不可用。这是尽力获取，不是稳定的官方 API；不尝试绕过访问验证，失败会警告并继续字幕翻译。已指定 ID 可以避免搜索歧义，但不能保证页面一定可访问。IMDb 的公开资料和豆瓣详情页示例见 [IMDb](https://www.imdb.com/title/tt0816692/) 与 [豆瓣](https://movie.douban.com/subject/1889243/)；抓取与解析模块为 `media_metadata.py`。
 
 
 目录批处理的显式 IMDb/豆瓣 ID 会用于该目录里的所有视频，适合同一作品或同一电视剧的分集。混合电影目录应按文件名自动查询，或按作品分开运行，避免全目录使用同一个 ID。

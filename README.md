@@ -1,5 +1,7 @@
 # llmsrt
 
+[![PyPI](https://img.shields.io/pypi/v/llmsrt)](https://pypi.org/project/llmsrt/)
+
 **English** | [简体中文](README.zh-CN.md)
 
 A command-line tool that extracts subtitles from video files and translates them with a large language model into **a single multilingual SRT** — by default Simplified Chinese on top, English below — instead of one file per language. Accepts a video file or a directory; by default it scans the current directory.
@@ -97,8 +99,6 @@ llmsrt /data/movie.mkv --asr
 ```
 
 `--asr` only invokes speech recognition when no usable text subtitle is found. Options like `--asr-model` and `--audio-stream` never enable recognition implicitly; `--no-asr` still disables it explicitly.
-
-Per the development workflow, **the script was not executed, dependencies were not installed, no API requests were made and no tests were run in the development environment**; verify behavior on your target machine.
 
 ### Sharing one config across directories
 
@@ -215,7 +215,7 @@ Automatic name matching requires the search result's title or alias to match exa
 
 Work metadata and search candidates are cached in `~/.cache/llmsrt/media/`, following `--cache-dir`, valid for 30 days by default. `--metadata-cache-days` changes the validity window; `--metadata-refresh` ignores the on-disk cache. Within one batch run, search and detail results are reused, and a query that already failed in the same run is not repeated. `--offline` reads only the local metadata cache (expired entries allowed) and never touches the sites; missing metadata degrades to the manual background or filename hints.
 
-Public pages and search-suggestion endpoints may become unavailable through 403, 429, login walls, bot checks, network timeouts or layout changes. This is best-effort scraping, not a stable official API; the tool does not attempt to bypass access checks — failures warn and translation continues. Specifying IDs avoids search ambiguity but cannot guarantee a page is reachable. Example pages: [IMDb](https://www.imdb.com/title/tt0816692/) and [Douban](https://movie.douban.com/subject/1889243/); scraping and parsing live in `media_metadata.py`. This scraping code was not executed or verified against the live sites during development.
+Public pages and search-suggestion endpoints may become unavailable through 403, 429, login walls, bot checks, network timeouts or layout changes. This is best-effort scraping, not a stable official API; the tool does not attempt to bypass access checks — failures warn and translation continues. Specifying IDs avoids search ambiguity but cannot guarantee a page is reachable. Example pages: [IMDb](https://www.imdb.com/title/tt0816692/) and [Douban](https://movie.douban.com/subject/1889243/); scraping and parsing live in `media_metadata.py`.
 
 For directory batches, an explicit IMDb/Douban ID applies to every video in the directory — right for one show or one TV series. Mixed movie directories should rely on per-file lookups, or be split per work, instead of forcing one ID onto everything.
 

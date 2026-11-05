@@ -1,0 +1,17 @@
+name: Lint
+
+# actionlint validates workflow syntax and runs shellcheck on every
+# `run:` block, so shell mistakes like an unclosed `if` fail here
+# instead of breaking the Release pipeline.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run actionlint
+        uses: rhysd/actionlint@v1
