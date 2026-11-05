@@ -33,6 +33,18 @@ cd /path/to/llmsrt
 python3 -m pip install --user .
 ```
 
+No clone is even needed — pip and pipx can install straight from this GitHub repository:
+
+```bash
+python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
+# With the optional speech-recognition extras:
+python3 -m pip install --user "llmsrt[asr] @ git+https://github.com/ivershuo/llmsrt.git"
+# Or as an isolated pipx tool:
+pipx install git+https://github.com/ivershuo/llmsrt.git
+```
+
+Git-based installs need `git` in PATH and build the package locally; dependencies still come from PyPI. Append `@v0.1.0` to the URL to pin a release tag, and re-run the same command with `--upgrade` to move to a newer revision.
+
 pip installs the program and its dependencies into the current user's Python directory and generates the `llmsrt` command. **No virtual environment is created for running it, and no `source activate` is needed after every SSH login.** Python dependencies are shared with the user's other Python projects. If an old `.venv` is still active, run `deactivate` once; `/usr/bin/python3 -m pip install --user .` selects a specific interpreter.
 
 On Linux the default command directory is `~/.local/bin`. If it is not in PATH, run in the current shell:

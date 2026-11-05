@@ -29,6 +29,18 @@ cd /path/to/llmsrt
 python3 -m pip install --user .
 ```
 
+也可以不克隆源码，pip 和 pipx 直接从 GitHub 仓库安装：
+
+```bash
+python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
+# 带语音识别可选依赖：
+python3 -m pip install --user "llmsrt[asr] @ git+https://github.com/ivershuo/llmsrt.git"
+# 或用 pipx 安装为独立工具：
+pipx install git+https://github.com/ivershuo/llmsrt.git
+```
+
+从 Git 安装需要 PATH 中有 `git`，包在本机现场构建；依赖仍从 PyPI 下载。在 URL 后加 `@v0.1.0` 可固定某个发布标签；升级时同一命令加 `--upgrade` 重新执行即可。
+
 pip 将程序和依赖装到当前用户的 Python 安装目录，自动生成 `llmsrt` 命令。**不创建运行用的虚拟环境，不需要每次 SSH 后执行 `source activate`。** Python 依赖会与这个用户的其他 Python 项目共享。如果当前仍激活着旧 `.venv`，先执行一次 `deactivate`；也可以通过 `/usr/bin/python3 -m pip install --user .` 指定解释器。
 
 Linux 的默认命令目录通常是 `~/.local/bin`。若它不在 PATH 中，在当前终端执行：
