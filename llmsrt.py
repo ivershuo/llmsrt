@@ -14,6 +14,7 @@ import hashlib
 import html
 from http.client import HTTPException
 import importlib
+from itertools import chain
 import json
 import logging
 import math
@@ -49,9 +50,9 @@ TOOL_PARAMETERS = {"tools", "tool_choice", "functions", "function_call", "parall
 CONFIG_KEYS = {
     "provider", "model", "base_url", "api_key_env", "batch_size", "batch_chars", "full_translation",
     "context_cues", "temperature", "max_tokens", "timeout", "retries",
-    "request_interval", "json_mode", "extra_body",
+    "request_interval", "json_mode", "stream", "extra_body",
     "title", "media_type", "year", "season", "episode", "media_context",
-    "media_context_file", "characters", "progress", "progress_interval", "model_quips",
+    "media_context_file", "characters", "progress", "progress_interval", "quips", "model_quips",
     "metadata", "metadata_sources", "imdb", "douban", "metadata_timeout",
     "metadata_cache_days", "metadata_refresh",
 }
@@ -224,6 +225,8 @@ class TerminalLogHandler(logging.Handler):
         from rich.text import Text
 
         try:
+            if not self.verbose and record.levelno < logging.ERROR and getattr(record, "optional_notice", False):
+                return
             compact = not self.verbose and record.levelno < logging.ERROR
             message = (getattr(record, "display_message", record.getMessage())
                        if compact else self.format(record))
@@ -248,7 +251,8 @@ class ProgressReporter:
     """Refresh terminal progress in place, with plain heartbeat logs for pipes."""
 
     def __init__(self, filename: str, file_index: int, file_total: int,
-                 *, interval: float, enabled: bool, console: Any = None, quip_generator: Any = None):
+                 *, interval: float, enabled: bool, console: Any = None,
+                 quips: bool = False, quip_generator: Any = None):
         self.label = f"[file {file_index}/{file_total}] {filename}"
         self.interval = interval
         self.enabled = enabled
@@ -271,7 +275,10 @@ class ProgressReporter:
         self.quip_round = 0
         self.quip_offset = 0
         self.quip_generator = quip_generator
+        self.quips_enabled = quips
         self.wait_cancel: threading.Event | None = None
+        self.response_total = self.response_received = 0
+        self.response_chars = self.reasoning_chars = 0
 
     def __enter__(self) -> ProgressReporter:
         if self.enabled:
@@ -283,7 +290,7 @@ class ProgressReporter:
 
                 self.spinner = Spinner("dots", style="cyan")
                 self.live = Live(console=self.console, get_renderable=self.render,
-                                 refresh_per_second=8, transient=True)
+                                 refresh_per_second=4, transient=True)
                 self.live.start(refresh=True)
             else:
                 self.emit()
@@ -297,9 +304,15 @@ class ProgressReporter:
         if self.thread is not None:
             self.thread.join(timeout=1)
 
+    @property
+    def visible_completed(self) -> float:
+        """Include provisional stream entries without marking them as cached."""
+        completed = self.completed + self.response_received
+        return min(self.total, completed) if self.total is not None else completed
+
     def eta(self, elapsed: float) -> str:
-        processed = self.completed - self.baseline
-        remaining = max(0, self.total - self.completed) if self.total is not None else None
+        processed = self.visible_completed - self.baseline
+        remaining = max(0, self.total - self.visible_completed) if self.total is not None else None
         if remaining == 0:
             return "00:00:00"
         return format_duration(elapsed * remaining / processed) if remaining is not None and processed > 0 else "estimating"
@@ -315,25 +328,27 @@ class ProgressReporter:
             header = Text(self.label, style="bold", overflow="ellipsis", no_wrap=True)
             stage = Table.grid(padding=(0, 1))
             stage.add_column(width=2)
-            stage.add_column()
-            stage.add_row(self.spinner, Text(self.stage, style="cyan"))
+            stage.add_column(no_wrap=True, overflow="ellipsis")
+            stage.add_row(self.spinner, Text(self.stage, style="cyan", no_wrap=True, overflow="ellipsis"))
             rows = [header, stage]
             if self.total is not None:
-                percent = 100 * self.completed / self.total if self.total else 100
+                completed = self.visible_completed
+                percent = 100 * completed / self.total if self.total else 100
                 bar = Table.grid(padding=(0, 1), expand=True)
                 bar.add_column(ratio=1)
-                bar.add_column(no_wrap=True)
+                bar.add_column(no_wrap=True, width=len(f"{self.total:g}/{self.total:g} {self.unit} (100.0%)"))
                 bar.add_row(
-                    ProgressBar(total=self.total or 1, completed=self.completed if self.total else 1,
-                                complete_style="cyan", finished_style="green"),
-                    Text(f"{self.completed:g}/{self.total:g} {self.unit} ({percent:.1f}%)"),
+                    ProgressBar(total=self.total or 1, completed=completed if self.total else 1,
+                                complete_style="cyan", finished_style="cyan" if self.response_total else "green"),
+                    Text(f"{completed:g}/{self.total:g} {self.unit} ({percent:.1f}%)"),
                 )
                 rows.append(bar)
-            if self.detail:
-                rows.append(Text(self.detail, style="dim", overflow="ellipsis", no_wrap=True))
+            else:
+                rows.append(Text(""))
+            rows.append(Text(self.detail, style="dim", overflow="ellipsis", no_wrap=True))
             quip = self.waiting_quip(time.monotonic())
-            if quip:
-                rows.append(Text(quip, style="dim italic", overflow="ellipsis", no_wrap=True))
+            if self.quips_enabled:
+                rows.append(Text(quip or "", style="dim italic", overflow="ellipsis", no_wrap=True))
             timing = f"Elapsed {format_duration(time.monotonic() - self.started)}"
             if self.total is not None:
                 timing += f"  ·  ETA {self.eta(elapsed)}"
@@ -342,8 +357,31 @@ class ProgressReporter:
             rows.append(Text(timing, style="dim", overflow="ellipsis", no_wrap=True))
             return Group(*rows)
 
+    def begin_response(self, total: int) -> None:
+        with self.lock:
+            self.response_total = total
+            self.response_received = self.response_chars = self.reasoning_chars = 0
+
+    def receive_response(self, received: int, content_chars: int, reasoning_chars: int) -> None:
+        with self.lock:
+            self.response_received = min(received, self.response_total)
+            self.response_chars, self.reasoning_chars = content_chars, reasoning_chars
+            # Show activity without leaking dialogue, story memory or reasoning.
+            if content_chars:
+                self.detail = f"receiving translations · {content_chars:,} characters · batch awaiting validation"
+            elif reasoning_chars:
+                self.detail = f"model thinking · {reasoning_chars:,} characters received"
+
+    def clear_response(self) -> None:
+        with self.lock:
+            self.response_total = self.response_received = 0
+            self.response_chars = self.reasoning_chars = 0
+
     @contextmanager
     def waiting(self, texts: list[str]):
+        if not self.quips_enabled:
+            yield
+            return
         quips = subtitle_quips(texts)
         cancel = threading.Event()
         with self.lock:
@@ -377,6 +415,8 @@ class ProgressReporter:
                 self.wait_started = time.monotonic() - QUIP_DELAY
 
     def waiting_quip(self, now: float) -> str | None:
+        if not self.quips_enabled:
+            return None
         started, quips, offset = self.wait_started, self.wait_quips, self.quip_offset
         if started is None and self.stage in QUIP_STAGES:
             started, quips, offset = self.stage_started, WAITING_QUIPS, 0
@@ -407,12 +447,18 @@ class ProgressReporter:
             self.completed = self.baseline = completed
             self.unit = unit
             self.detail = detail
+            self.response_total = self.response_received = 0
+            self.response_chars = self.reasoning_chars = 0
         self.emit()
 
     def update(self, *, completed: float | None = None, detail: str | None = None,
                emit: bool = False) -> None:
         with self.lock:
             if completed is not None:
+                # Promote the validated batch and remove its provisional count
+                # in one frame, avoiding a brief rollback or double count.
+                self.response_total = self.response_received = 0
+                self.response_chars = self.reasoning_chars = 0
                 self.completed = max(self.completed, completed)
                 if self.total is not None:
                     self.completed = min(self.total, self.completed)
@@ -430,8 +476,9 @@ class ProgressReporter:
             elapsed = time.monotonic() - self.stage_started
             parts = [self.label, self.stage]
             if self.total is not None:
-                percent = 100 * self.completed / self.total if self.total else 100
-                parts.append(f"{self.completed:g}/{self.total:g} {self.unit} ({percent:.1f}%)")
+                completed = self.visible_completed
+                percent = 100 * completed / self.total if self.total else 100
+                parts.append(f"{completed:g}/{self.total:g} {self.unit} ({percent:.1f}%)")
                 parts.append(f"ETA {self.eta(elapsed)}")
             parts.append(f"stage elapsed {format_duration(elapsed)}")
             if self.detail:
@@ -847,13 +894,160 @@ class NoRedirect(urlrequest.HTTPRedirectHandler):
         return None
 
 
+class StreamedItems:
+    """Count complete entries in the root items array for provisional UI only."""
+
+    def __init__(self, requested: list[dict[str, Any]]):
+        self.expected = {item["id"]: set(item.get("targets", [])) for item in requested}
+        self.received: set[int] = set()
+        self.stack: list[str] = []
+        self.in_string = self.escaped = False
+        self.root_string: list[str] = []
+        self.key = ""
+        self.items_depth: int | None = None
+        self.entry: list[str] | None = None
+
+    def feed(self, content: str) -> int:
+        # Scan each character once; decode only complete entry objects. Quoted
+        # braces, escaped quotes and story_update objects cannot advance the bar.
+        for char in content:
+            if self.entry is not None:
+                self.entry.append(char)
+            if self.in_string:
+                if len(self.stack) == 1:
+                    self.root_string.append(char)
+                if self.escaped:
+                    self.escaped = False
+                elif char == "\\":
+                    self.escaped = True
+                elif char == '"':
+                    self.in_string = False
+                continue
+            if char == '"':
+                self.in_string = True
+                if len(self.stack) == 1:
+                    self.root_string = [char]
+            elif char == ":" and len(self.stack) == 1:
+                try:
+                    self.key = json.loads("".join(self.root_string))
+                except ValueError:
+                    self.key = ""
+            elif char in "{[":
+                if char == "[" and self.stack == ["{"] and self.key == "items":
+                    self.items_depth = 2
+                elif char == "{" and self.items_depth is not None and len(self.stack) == self.items_depth:
+                    self.entry = [char]
+                self.stack.append(char)
+            elif char in "}]" and self.stack:
+                self.stack.pop()
+                if self.entry is not None and len(self.stack) == self.items_depth:
+                    self.accept("".join(self.entry))
+                    self.entry = None
+                if self.items_depth is not None and len(self.stack) < self.items_depth:
+                    self.items_depth = None
+            elif char == "," and len(self.stack) == 1:
+                self.key = ""
+        return len(self.received)
+
+    def accept(self, content: str) -> None:
+        try:
+            item = json.loads(content)
+            index, translations = item["id"], item["translations"]
+            if (type(index) is int and index in self.expected and isinstance(translations, dict)
+                    and set(translations) == self.expected[index]
+                    and all(isinstance(text, str) and clean_text(text) for text in translations.values())):
+                self.received.add(index)
+        except (ValueError, KeyError, TypeError):
+            pass  # Final batch validation reports malformed output; never cache here.
+
+
+def sse_data(lines: Any):
+    """Yield data from SSE events, including multiline data and a final EOF event."""
+    parts: list[str] = []
+    for raw in lines:
+        try:
+            line = raw.decode("utf-8").rstrip("\r\n")
+        except UnicodeError as exc:
+            raise InvalidLLMResponse("API stream is not UTF-8") from exc
+        if not line:
+            if parts:
+                yield "\n".join(parts)
+                parts.clear()
+        elif line.startswith("data:"):
+            parts.append(line[5:].removeprefix(" "))
+    if parts:
+        yield "\n".join(parts)
+
+
+def read_llm_response(response: Any, requested: list[dict[str, Any]],
+                      progress: ProgressReporter | None = None) -> dict[str, Any]:
+    # Accept ordinary JSON too: some compatible gateways ignore stream=true.
+    first = response.readline()
+    while first and not first.strip():
+        first = response.readline()
+    if not first.lstrip().startswith((b"data:", b":", b"event:", b"id:", b"retry:")):
+        try:
+            result = json.loads((first + response.read()).decode("utf-8"))
+        except ValueError as exc:
+            raise InvalidLLMResponse("API response is not JSON") from exc
+        if not isinstance(result, dict):
+            raise InvalidLLMResponse("API response is not a JSON object")
+        return result
+    preview = StreamedItems(requested)
+    fragments: list[str] = []
+    content_chars = reasoning_chars = 0
+    finish_reason = None
+    usage = None
+    refusal: list[str] = []
+    for data in sse_data(chain((first,), response)):
+        if data == "[DONE]":
+            break
+        try:
+            event = json.loads(data)
+            if not isinstance(event, dict) or event.get("error"):
+                raise InvalidLLMResponse("API returned a streaming error")
+            if isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+            choices = event.get("choices", [])
+            if not isinstance(choices, list):
+                raise InvalidLLMResponse("Invalid choices in API stream")
+            for choice in choices:
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta", {})
+                if delta.get("tool_calls") or delta.get("function_call"):
+                    raise LlmsrtError("Model returned a tool call, but tool use is disabled")
+                content = delta.get("content") or ""
+                reasoning = delta.get("reasoning_content") or ""
+                if not isinstance(content, str) or not isinstance(reasoning, str):
+                    raise InvalidLLMResponse("Invalid text in API stream")
+                if delta.get("refusal"):
+                    refusal.append(str(delta["refusal"]))
+                if content:
+                    fragments.append(content)
+                    content_chars += len(content)
+                    preview.feed(content)
+                reasoning_chars += len(reasoning)
+                if progress and (content or reasoning):
+                    progress.receive_response(len(preview.received), content_chars, reasoning_chars)
+                if choice.get("finish_reason") is not None:
+                    finish_reason = choice["finish_reason"]
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise InvalidLLMResponse("Malformed API stream event") from exc
+    if finish_reason is None:
+        raise InvalidLLMResponse("API stream ended before the response completed")
+    return {"choices": [{"finish_reason": finish_reason, "message": {
+        "content": "".join(fragments), "refusal": "".join(refusal),
+    }}], "usage": usage}
+
+
 def make_llm_request(args: argparse.Namespace, prompt: str, payload: dict[str, Any],
-                     *, token_limit: int | None = None) -> tuple[urlrequest.Request, str]:
+                     *, token_limit: int | None = None, stream: bool = False) -> tuple[urlrequest.Request, str]:
     api_key = os.environ.get(args.api_key_env, "").strip()
     if not api_key:
         raise LlmsrtError(f"Missing API key; set the {args.api_key_env} environment variable")
     body: dict[str, Any] = {
-        "model": args.model, "stream": False,
+        "model": args.model, "stream": stream,
         "messages": [{"role": "system", "content": prompt},
                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
     }
@@ -863,7 +1057,12 @@ def make_llm_request(args: argparse.Namespace, prompt: str, payload: dict[str, A
         body["temperature"] = args.temperature
     limit_key = "max_completion_tokens" if args.provider == "openai" else "max_tokens"
     body[limit_key] = args.max_tokens if token_limit is None else token_limit
+    if stream and args.provider in PROVIDERS:
+        body["stream_options"] = {"include_usage": True}
     body.update(args.extra_body)
+    if not stream:
+        # Extra streaming options must not leak into nonstreaming quip calls.
+        body.pop("stream_options", None)
     # No tools are declared. Some compatible APIs reject even tool_choice="none"
     # without tools, so omit both; configuration and response validation enforce
     # the no-tools policy for translations and quips alike.
@@ -1004,7 +1203,7 @@ class LLMTranslator:
 
     def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         args = self.args
-        request, api_key = make_llm_request(args, TRANSLATION_PROMPT, payload)
+        request, api_key = make_llm_request(args, TRANSLATION_PROMPT, payload, stream=args.stream)
         for attempt in range(args.retries + 1):
             interval = args.request_interval - (time.monotonic() - self.last_request)
             if interval > 0:
@@ -1015,19 +1214,15 @@ class LLMTranslator:
             delay = min(2 ** (attempt + 1), 60)
             if self.progress:
                 items = payload["items"]
+                if args.stream:
+                    self.progress.begin_response(len(items))
                 self.progress.update(
                     detail=f"waiting for {args.model}, subtitles #{items[0]['id']}-#{items[-1]['id']}, "
                            f"{len(items)} entries, attempt {attempt + 1}/{args.retries + 1}", emit=True,
                 )
             try:
                 with self.opener.open(request, timeout=args.timeout) as response:
-                    raw = response.read()
-                try:
-                    result = json.loads(raw.decode("utf-8"))
-                except ValueError as exc:
-                    raise InvalidLLMResponse("API response is not JSON") from exc
-                if not isinstance(result, dict):
-                    raise InvalidLLMResponse("API response is not a JSON object")
+                    result = read_llm_response(response, payload["items"], self.progress if args.stream else None)
                 usage = result.get("usage")
                 if isinstance(usage, dict):
                     LOG.debug("Model %s, tokens this call: input %s, output %s", args.model,
@@ -1049,6 +1244,8 @@ class LLMTranslator:
                     pass
             except (urlerror.URLError, TimeoutError, OSError, HTTPException) as exc:
                 message = f"LLM request failed: {str(exc).replace(api_key, '[REDACTED]')}"
+            if self.progress:
+                self.progress.clear_response()
             if attempt == args.retries:
                 raise LlmsrtError(message)
             LOG.warning("%s; retrying in %s s (%s/%s)", message, delay, attempt + 1, args.retries)
@@ -1155,6 +1352,8 @@ class LLMTranslator:
                                     translations[target] = self.chinese(text, target)
                 break
             except InvalidLLMResponse as exc:
+                if self.progress:
+                    self.progress.clear_response()
                 if not isinstance(exc, TruncatedLLMResponse) and attempt < self.args.retries:
                     LOG.warning("%s; retrying subtitle batch (%s/%s)", exc, attempt + 1, self.args.retries)
                     continue
@@ -1402,8 +1601,10 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metadata-refresh", action="store_true", help="ignore the on-disk metadata cache and re-fetch; results are still reused within one run")
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="live terminal progress with spinner and progress bar; disable with --no-progress")
     parser.add_argument("--progress-interval", type=float, default=5, help="plain-text progress interval in seconds when output is redirected or piped")
+    parser.add_argument("--quips", action=argparse.BooleanOptionalAction, default=False,
+                        help="show waiting quips; off by default")
     parser.add_argument("--model-quips", action=argparse.BooleanOptionalAction, default=True,
-                        help="generate spoiler-conscious waiting quips with background model calls; --no-model-quips uses local messages only")
+                        help="use background model calls when --quips is enabled; --no-model-quips uses local messages only")
     parser.add_argument("--provider", default=os.environ.get("LLMSRT_PROVIDER", "openai"),
                         help="provider name: openai/deepseek presets, or a custom OpenAI-compatible provider with explicit model, base URL and key variable")
     parser.add_argument("--model", default=os.environ.get("LLMSRT_MODEL"), help="model name; defaults to the provider preset")
@@ -1420,6 +1621,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retries", type=int, default=2, help="retries after request or structure errors")
     parser.add_argument("--request-interval", type=float, default=0, help="minimum seconds between API requests")
     parser.add_argument("--json-mode", action=argparse.BooleanOptionalAction, default=True, help="use response_format=json_object; add --no-json-mode if unsupported")
+    parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True,
+                        help="receive translations incrementally; disable with --no-stream for incompatible APIs")
     parser.add_argument("--extra-body", default="{}", help='extra API parameters as JSON, e.g. {"thinking":{"type":"disabled"}}')
     parser.add_argument("-r", "--recursive", action="store_true", help="process subdirectories recursively")
     output = parser.add_mutually_exclusive_group()
@@ -1480,6 +1683,8 @@ def configure_llm(args: argparse.Namespace) -> None:
     args.provider = args.provider.strip().lower()
     if type(args.full_translation) is not bool:
         raise LlmsrtError("full_translation must be the JSON boolean true or false")
+    if type(args.stream) is not bool:
+        raise LlmsrtError("stream must be the JSON boolean true or false")
     profile = PROVIDERS.get(args.provider, {})
     for name in ("model", "base_url", "api_key_env"):
         setattr(args, name, getattr(args, name) or profile.get(name))
@@ -1555,6 +1760,8 @@ def configure_media_and_progress(args: argparse.Namespace) -> None:
         raise LlmsrtError("progress must be the JSON boolean true or false")
     if type(args.model_quips) is not bool:
         raise LlmsrtError("model_quips must be the JSON boolean true or false")
+    if type(args.quips) is not bool:
+        raise LlmsrtError("quips must be the JSON boolean true or false")
     interval = args.progress_interval
     if type(interval) not in {int, float} or not math.isfinite(interval) or interval <= 0:
         raise LlmsrtError("progress_interval must be a finite number greater than 0")
@@ -1635,7 +1842,7 @@ def main() -> int:
         configure_llm(args)
         configure_media_and_progress(args)
         configure_metadata(args)
-        if args.model_quips and args.progress and not args.offline and console.is_terminal and not console.is_dumb_terminal:
+        if args.quips and args.model_quips and args.progress and not args.offline and console.is_terminal and not console.is_dumb_terminal:
             quip_generator = ModelQuips(args)
         if args.offline:
             os.environ["HF_HUB_OFFLINE"] = "1"
@@ -1653,7 +1860,7 @@ def main() -> int:
             try:
                 with ProgressReporter(video.name, file_index, len(videos),
                                       interval=args.progress_interval, enabled=args.progress,
-                                      console=console, quip_generator=quip_generator) as progress:
+                                      console=console, quips=args.quips, quip_generator=quip_generator) as progress:
                     destination = output_path(video, root, args)
                     if process_video(video, destination, args, translator, recognizer, metadata, progress):
                         completed += 1

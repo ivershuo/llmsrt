@@ -10,12 +10,12 @@ from llmsrt import LOG, QUIP_DELAY, QUIP_INTERVAL, WAITING_QUIPS, ProgressReport
 
 
 class ProgressTests(unittest.TestCase):
-    def reporter(self, *, terminal=False, enabled=True, width=100):
+    def reporter(self, *, terminal=False, enabled=True, width=100, quips=True):
         output = io.StringIO()
         console = Console(file=output, force_terminal=terminal, color_system=None,
                           width=width, _environ={"TERM": "xterm-256color"})
         progress = ProgressReporter("电影[red].mkv", 1, 2, interval=0.01,
-                                    enabled=enabled, console=console)
+                                    enabled=enabled, console=console, quips=quips)
         return progress, output
 
     def test_live_render_and_logs_preserve_literal_text(self):
@@ -176,6 +176,76 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(progress.waiting_quip(100 + QUIP_DELAY), WAITING_QUIPS[0])
             progress.set_stage("writing subtitles", total=2)
             self.assertIsNone(progress.waiting_quip(1000))
+
+    def test_live_height_stays_fixed_across_stages_receipts_and_quips(self):
+        for width in (20, 30, 80, 120):
+            for quips in (True, False):
+                with self.subTest(width=width, quips=quips):
+                    progress, _ = self.reporter(terminal=True, width=width, quips=quips)
+                    heights = []
+                    bar_widths = []
+                    with progress:
+                        def capture():
+                            lines = progress.console.render_lines(progress.render())
+                            heights.append(len(lines))
+                            return ["".join(segment.text for segment in line) for line in lines]
+
+                        capture()
+                        progress.set_stage("translating subtitles" * 4, total=200, detail="long detail " * 50)
+                        capture()
+                        progress.begin_response(200)
+                        with progress.waiting(["Coffee?"]):
+                            for received in (1, 10, 200):
+                                progress.receive_response(received, received * 100, 30)
+                                now = (progress.wait_started or 0) + QUIP_DELAY
+                                with patch("llmsrt.time.monotonic", return_value=now):
+                                    lines = capture()
+                                    bar_widths.append(lines[2].find(f"{received}/200"))
+                        progress.clear_response()
+                        progress.set_stage("writing subtitles", total=200)
+                        capture()
+                    self.assertEqual(set(heights), {6 if quips else 5})
+                    self.assertEqual(len(set(bar_widths)), 1)
+
+    def test_one_overall_bar_includes_stream_and_rolls_back_only_on_retry(self):
+        from rich.progress_bar import ProgressBar
+
+        progress, _ = self.reporter(terminal=True, quips=False)
+        with progress:
+            progress.set_stage("translating subtitles", total=100, completed=40)
+            progress.begin_response(20)
+            progress.receive_response(10, 100, 0)
+            self.assertEqual(progress.visible_completed, 50)
+            self.assertEqual(progress.completed, 40)
+            self.assertEqual(progress.eta(10), "00:00:50")
+            renderable = progress.render()
+            bars = [cell for row in renderable.renderables if hasattr(row, "columns")
+                    for column in row.columns for cell in column._cells if isinstance(cell, ProgressBar)]
+            self.assertEqual(len(bars), 1)
+            self.assertEqual((bars[0].completed, bars[0].total), (50, 100))
+            with progress.console.capture() as capture:
+                progress.console.print(renderable)
+            self.assertIn("50/100 entries (50.0%)", capture.get())
+            self.assertNotIn("Received", capture.get())
+            progress.clear_response()
+            self.assertEqual(progress.visible_completed, 40)
+            progress.begin_response(20)
+            progress.receive_response(20, 200, 0)
+            self.assertEqual(progress.visible_completed, 60)
+            progress.update(completed=60)
+            self.assertEqual(progress.visible_completed, 60)
+            self.assertEqual(progress.response_total, 0)
+
+    def test_default_reporter_displays_no_quips_and_starts_no_worker(self):
+        from unittest.mock import Mock
+
+        generator = Mock()
+        progress = ProgressReporter("test", 1, 1, interval=5, enabled=True, quip_generator=generator)
+        progress.live = Mock()
+        with progress.waiting(["Coffee?"]):
+            self.assertIsNone(progress.wait_started)
+            self.assertIsNone(progress.waiting_quip(100000))
+        generator.start.assert_not_called()
 
 
 if __name__ == "__main__":

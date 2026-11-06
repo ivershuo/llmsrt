@@ -93,7 +93,7 @@ Translation and quips declare no tools and omit `tools` and `tool_choice` for AP
 }
 ```
 
-Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `full_translation`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
+Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `full_translation`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `stream`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `quips`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
 
 **Use `llmsrt -h` for detailed usage help.**
 
@@ -147,7 +147,9 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 
 ### Progress
 
-Interactive terminals show a spinner and progress bar with stage, subtitle count, elapsed time, ETA and token usage. Notices use compact lines without automatic highlighting; `--verbose` shows full diagnostics. Waiting quips use the current model in the background by default, with local lines as fallback; `--no-model-quips` or `"model_quips": false` disables these extra calls. They draw on the current batch's atmosphere without quoting plot details; the story summary is not shared. Use `--no-progress` to hide progress.
+Interactive terminals show a spinner and one progress bar with stage, subtitle count, elapsed time, ETA and token usage. Translation streams by default, advancing overall progress as entries arrive; results are cached only after batch validation, and retries reset provisional progress. Use `--no-stream` or `"stream": false` for incompatible APIs. Optional metadata misses stay quiet; `--verbose` shows full diagnostics. Use `--no-progress` to hide progress.
+
+Waiting quips are off by default. `--quips` enables them using the current model in the background, with local lines as fallback; add `--no-model-quips` to use local lines only. Quips draw on the current batch's atmosphere without quoting plot details; the story summary is not shared.
 
 Redirected or piped output uses plain-text status lines every 5 seconds (`--progress-interval`), so `| tee run.log` works. Quip model calls are skipped for pipes, offline mode and `--no-progress`.
 
@@ -189,7 +191,7 @@ python3 -m pip install --user --upgrade llmsrt   # or: pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-Append `@v0.1.3` to the git URL to pin a release tag.
+Append `@v0.1.4` to the git URL to pin a release tag.
 
 **How accurate is the translation?** — speech recognition can miss or mishear dialogue, and LLMs can mistranslate names, slang or context. The tool validates subtitle structure and entry correspondence, but cannot guarantee the translations are fully accurate.
 

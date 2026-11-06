@@ -249,7 +249,7 @@ class StoryContextTests(unittest.TestCase):
         console = Console(file=stream, force_terminal=True, color_system=None,
                           _environ={"TERM": "xterm-256color"})
         progress = llmsrt.ProgressReporter("test.mkv", 1, 1, interval=5, enabled=True,
-                                          console=console, quip_generator=generator)
+                                          console=console, quips=True, quip_generator=generator)
         with progress, patch.object(translator, "request", side_effect=lambda payload: response(
                 payload, memory("PRIVATE_STORY_SECRET"))):
             translator.translate_cues(self.cues, "en", ["ja", "en"], self.context, progress)

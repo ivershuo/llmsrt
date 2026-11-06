@@ -493,11 +493,8 @@ class MetadataResolver:
             except (MetadataError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 self.failures.add(memo)
                 label = "IMDb" if source == "imdb" else "Douban"
-                notice = (f"{label}: no unique match; add --{source} to specify the work."
-                          if str(exc).startswith("No unique match") else
-                          f"{label}: metadata unavailable; continuing without this source.")
                 LOG.warning("%s metadata unavailable: %s; continuing with other sources or the manual background", source, exc,
-                            extra={"display_message": notice})
+                            extra={"optional_notice": True})
         # If IMDb name search failed, a subsequent Douban page may provide an
         # exact IMDb ID. Read that title page directly without another search.
         linked_id = next((r.get("imdb_id") for r in records if r.get("imdb_id")), None)
@@ -509,7 +506,7 @@ class MetadataResolver:
                     LOG.info("Fetched IMDb metadata via the Douban-linked ID: %s", record["title"])
             except (MetadataError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 LOG.warning("Douban-linked IMDb metadata unavailable: %s", exc,
-                            extra={"display_message": "IMDb: linked metadata unavailable; continuing without it."})
+                            extra={"optional_notice": True})
         enriched = dict(context)
         if records:
             enriched["catalog_metadata"] = records

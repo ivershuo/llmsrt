@@ -16,6 +16,7 @@
   "metadata_refresh": false,
   "progress": true,
   "progress_interval": 5,
+  "quips": false,
   "model_quips": true,
   "batch_size": 200,
   "batch_chars": 24000,
@@ -25,5 +26,6 @@
   "timeout": 600,
   "retries": 2,
   "request_interval": 0,
-  "json_mode": true
+  "json_mode": true,
+  "stream": true
 }

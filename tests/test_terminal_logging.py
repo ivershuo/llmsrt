@@ -61,7 +61,7 @@ class TerminalLoggingTests(unittest.TestCase):
         self.assertNotIn("Short notice", text)
         self.assertNotIn("…", text)
 
-    def test_metadata_misses_are_brief_in_terminal_and_complete_in_pipes(self):
+    def test_optional_metadata_misses_are_quiet_in_terminal_and_complete_in_pipes(self):
         filename = ("Star.Trek.The.Next.Generation.S02E17.Samaritan.Snare.1080p.BluRay."
                     "REMUX.AVC.DTS-HD.MA.7.1-NOGRP.mkv")
         args = llmsrt.argument_parser().parse_args([])
@@ -82,10 +82,7 @@ class TerminalLoggingTests(unittest.TestCase):
                     resolver.enrich(llmsrt.media_context_for(Path(filename), args), args, Mock())
                 if mode == "terminal":
                     text = console.export_text()
-                    self.assertEqual(len(text.splitlines()), 2)
-                    self.assertIn("! IMDb: no unique match; add --imdb", text)
-                    self.assertIn("! Douban: no unique match; add --douban", text)
-                    self.assertNotIn("continuing with other sources", text)
+                    self.assertEqual(text, "")
                 else:
                     text = stream.getvalue()
                     if mode == "verbose":

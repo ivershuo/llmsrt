@@ -25,7 +25,7 @@ class ModelQuipTests(unittest.TestCase):
         llmsrt.configure_llm(self.args)
         self.generator = llmsrt.ModelQuips(self.args)
         self.addCleanup(self.generator.close)
-        self.progress = llmsrt.ProgressReporter("test.mkv", 1, 1, interval=5, enabled=False)
+        self.progress = llmsrt.ProgressReporter("test.mkv", 1, 1, interval=5, enabled=False, quips=True)
         self.environment = patch.dict("os.environ", {"LLMSRT_QUIP_TEST_KEY": "private-test-key"})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -45,6 +45,21 @@ class ModelQuipTests(unittest.TestCase):
                        model_result(message={"refusal": "no", "content": "{}"})):
             with self.subTest(result=result):
                 self.assertEqual(llmsrt.validate_model_quips(result, "Hello"), ())
+
+    def test_quips_default_off_with_config_and_cli_opt_in(self):
+        self.assertFalse(self.args.quips)
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text('{"quips": true}')
+            for extra, expected in (([], True), (["--no-quips"], False)):
+                with patch("sys.argv", ["llmsrt", "--config", str(config), *extra]):
+                    args = llmsrt.configured_arguments(llmsrt.argument_parser())
+                    self.assertEqual(args.quips, expected)
+                    llmsrt.configure_media_and_progress(args)
+        self.assertTrue(llmsrt.argument_parser().parse_args(["--quips"]).quips)
+        self.args.quips = "false"
+        with self.assertRaisesRegex(llmsrt.LlmsrtError, "quips"):
+            llmsrt.configure_media_and_progress(self.args)
 
     def test_request_runs_in_parallel_and_only_one_worker_is_allowed(self):
         entered, release = threading.Event(), threading.Event()
