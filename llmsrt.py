@@ -32,7 +32,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from media_metadata import SOURCES, MetadataError, MetadataResolver, canonical_url
+from media_metadata import SOURCES, MetadataError, MetadataResolver, canonical_url, filename_hints
 
 
 LOG = logging.getLogger("llmsrt")
@@ -210,6 +210,38 @@ def subtitle_quips(texts: list[str]) -> tuple[str, ...]:
     themed = tuple(quip for pattern, quips in QUIP_THEMES
                    if re.search(pattern, sample, re.IGNORECASE) for quip in quips)
     return themed + WAITING_QUIPS
+
+
+class TerminalLogHandler(logging.Handler):
+    """Keep terminal notices compact without syntax highlighting or padded columns."""
+
+    def __init__(self, console: Any, *, verbose: bool = False):
+        super().__init__()
+        self.console = console
+        self.verbose = verbose
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from rich.text import Text
+
+        try:
+            compact = not self.verbose and record.levelno < logging.ERROR
+            message = (getattr(record, "display_message", record.getMessage())
+                       if compact else self.format(record))
+            if compact:
+                message = " ".join(message.split())
+            if record.levelno >= logging.ERROR:
+                symbol, style = "✗", "red"
+            elif record.levelno >= logging.WARNING:
+                symbol, style = "!", "yellow"
+            else:
+                symbol, style = "·", "dim"
+            line = Text()
+            line.append(f"{record.levelname} " if self.verbose else f"{symbol} ", style=style)
+            line.append(message)
+            self.console.print(line, no_wrap=compact, overflow="ellipsis" if compact else "fold",
+                               markup=False, highlight=False)
+        except Exception:
+            self.handleError(record)
 
 
 class ProgressReporter:
@@ -832,8 +864,9 @@ def make_llm_request(args: argparse.Namespace, prompt: str, payload: dict[str, A
     limit_key = "max_completion_tokens" if args.provider == "openai" else "max_tokens"
     body[limit_key] = args.max_tokens if token_limit is None else token_limit
     body.update(args.extra_body)
-    if args.provider in {"openai", "deepseek"}:
-        body["tool_choice"] = "none"
+    # No tools are declared. Some compatible APIs reject even tool_choice="none"
+    # without tools, so omit both; configuration and response validation enforce
+    # the no-tools policy for translations and quips alike.
     return urlrequest.Request(
         args.base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -1308,9 +1341,12 @@ def process_video(
         progress.finish("skipped")
         return False
     media_context = metadata.enrich(media_context_for(video, args), args, progress)
-    LOG.info("Show background: %s (%s)", media_context["title"],
-             {"user": "user-provided", "filename_hint": "filename hint"}.get(
-                 media_context["title_source"], media_context["title_source"]))
+    title_source = {"user": "user-provided", "filename_hint": "filename hint"}.get(
+        media_context["title_source"], media_context["title_source"])
+    display_title = (filename_hints(video.name)["title"] if media_context["title_source"] == "filename_hint"
+                     else media_context["title"])
+    LOG.info("Show background: %s (%s)", media_context["title"], title_source,
+             extra={"display_message": f"Background: {display_title} ({title_source})"})
     progress.set_stage("probing video streams")
     streams = probe_video(video)
     with tempfile.TemporaryDirectory(prefix="llmsrt-") as temporary:
@@ -1323,7 +1359,8 @@ def process_video(
                     "For local speech recognition, install the optional dependencies from requirements-asr.txt and add --asr"
                 )
             source = recognizer.transcribe(video, streams, Path(temporary), progress)
-        LOG.info("%s: %s, source language %s, %s subtitles", video.name, source.method, source.language, len(source.cues))
+        LOG.info("%s: %s, source language %s, %s subtitles", video.name, source.method, source.language, len(source.cues),
+                 extra={"display_message": f"Subtitles: {source.method} · {source.language} · {len(source.cues)} entries"})
         translated = translator.translate_cues(source.cues, source.language, args.targets,
                                               media_context, progress)
         progress.set_stage("writing subtitles", total=len(source.cues))
@@ -1562,13 +1599,10 @@ def main() -> int:
     try:
         console = dependency("rich.console").Console(file=sys.stdout, highlight=False)
         if console.is_terminal and not console.is_dumb_terminal:
-            from rich.logging import RichHandler
-
             logging.basicConfig(
                 level=logging.DEBUG if args.verbose else logging.INFO,
                 format="%(message)s", force=True,
-                handlers=[RichHandler(console=console, show_time=False, show_path=False,
-                                      markup=False, highlighter=None)],
+                handlers=[TerminalLogHandler(console, verbose=args.verbose)],
             )
         if args.cpu_threads < 1:
             raise LlmsrtError("--cpu-threads must be greater than 0")

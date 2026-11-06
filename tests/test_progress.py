@@ -5,9 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from rich.console import Console
-from rich.logging import RichHandler
 
-from llmsrt import LOG, QUIP_DELAY, QUIP_INTERVAL, WAITING_QUIPS, ProgressReporter, subtitle_quips
+from llmsrt import LOG, QUIP_DELAY, QUIP_INTERVAL, WAITING_QUIPS, ProgressReporter, TerminalLogHandler, subtitle_quips
 
 
 class ProgressTests(unittest.TestCase):
@@ -21,8 +20,7 @@ class ProgressTests(unittest.TestCase):
 
     def test_live_render_and_logs_preserve_literal_text(self):
         progress, output = self.reporter(terminal=True)
-        handler = RichHandler(console=progress.console, show_time=False, show_path=False,
-                              markup=False, highlighter=None)
+        handler = TerminalLogHandler(progress.console)
         with patch.object(LOG, "handlers", [handler]), patch.object(LOG, "level", logging.INFO), \
                 patch.object(LOG, "propagate", False):
             with progress:

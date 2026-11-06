@@ -72,6 +72,8 @@ class ModelQuipTests(unittest.TestCase):
                 self.assertEqual((self.progress.input_tokens, self.progress.output_tokens), (12, 8))
                 request = api.call_args.args[0]
                 body = json.loads(request.data)
+                self.assertNotIn("tool_choice", body)
+                self.assertNotIn("tools", body)
                 self.assertEqual(json.loads(body["messages"][1]["content"]), {"current_subtitles": "Coffee?"})
                 self.assertIn("NOT watched", body["messages"][0]["content"])
                 self.assertEqual(body["max_completion_tokens"], 1024)

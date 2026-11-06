@@ -78,7 +78,7 @@ llmsrt movie.mkv --provider custom --base-url https://your-gateway.example/v1 \
 
 Only OpenAI and DeepSeek have built-in presets. Any other `--provider` name is treated as a custom OpenAI-compatible service and requires `--model`, `--base-url` and `--api-key-env` (or their config/environment equivalents). Presets use fixed model names; pass `--model` to select another model.
 
-Translation and quips disable tool use: OpenAI/DeepSeek requests send `tool_choice: "none"`; custom providers omit it. Tool and web-search parameters are blocked in `--extra-body`. IMDb/Douban lookups remain separate.
+Translation and quips declare no tools and omit `tools` and `tool_choice` for API compatibility. Tool and web-search parameters are blocked in `--extra-body`, and tool-call responses are rejected. IMDb/Douban lookups remain separate.
 
 ### Config file
 
@@ -147,7 +147,7 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 
 ### Progress
 
-Interactive terminals show a spinner and progress bar with stage, subtitle count, elapsed time, ETA and token usage. Waiting quips use the current model in the background by default, with local lines as fallback; `--no-model-quips` or `"model_quips": false` disables these extra calls. They draw on the current batch's atmosphere without quoting plot details; the story summary is not shared. Use `--no-progress` to hide progress or `--verbose` for request details.
+Interactive terminals show a spinner and progress bar with stage, subtitle count, elapsed time, ETA and token usage. Notices use compact lines without automatic highlighting; `--verbose` shows full diagnostics. Waiting quips use the current model in the background by default, with local lines as fallback; `--no-model-quips` or `"model_quips": false` disables these extra calls. They draw on the current batch's atmosphere without quoting plot details; the story summary is not shared. Use `--no-progress` to hide progress.
 
 Redirected or piped output uses plain-text status lines every 5 seconds (`--progress-interval`), so `| tee run.log` works. Quip model calls are skipped for pipes, offline mode and `--no-progress`.
 
@@ -189,7 +189,7 @@ python3 -m pip install --user --upgrade llmsrt   # or: pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-Append `@v0.1.2` to the git URL to pin a release tag.
+Append `@v0.1.3` to the git URL to pin a release tag.
 
 **How accurate is the translation?** — speech recognition can miss or mishear dialogue, and LLMs can mistranslate names, slang or context. The tool validates subtitle structure and entry correspondence, but cannot guarantee the translations are fully accurate.
 

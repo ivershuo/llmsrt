@@ -342,7 +342,7 @@ class MetadataResolver:
         progress.update(detail=f"fetching metadata: {url}", emit=True)
         self.last_request = time.monotonic()
         req = request.Request(url, headers={
-            "User-Agent": "llmsrt/0.1.2 (subtitle background metadata)",
+            "User-Agent": "llmsrt/0.1.3 (subtitle background metadata)",
             "Accept": "text/html,application/json", "Accept-Language": "zh-CN,en;q=0.8",
         })
         try:
@@ -487,10 +487,17 @@ class MetadataResolver:
                     title = record["title"]
                     if year is None:
                         year = record.get("year")
-                LOG.info("Fetched %s metadata: %s (%s) %s", source, record["title"], record.get("year") or "?", record["url"])
+                label = "IMDb" if source == "imdb" else "Douban"
+                LOG.info("Fetched %s metadata: %s (%s) %s", source, record["title"], record.get("year") or "?", record["url"],
+                         extra={"display_message": f"{label}: {record['title']} ({record.get('year') or '?'})"})
             except (MetadataError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 self.failures.add(memo)
-                LOG.warning("%s metadata unavailable: %s; continuing with other sources or the manual background", source, exc)
+                label = "IMDb" if source == "imdb" else "Douban"
+                notice = (f"{label}: no unique match; add --{source} to specify the work."
+                          if str(exc).startswith("No unique match") else
+                          f"{label}: metadata unavailable; continuing without this source.")
+                LOG.warning("%s metadata unavailable: %s; continuing with other sources or the manual background", source, exc,
+                            extra={"display_message": notice})
         # If IMDb name search failed, a subsequent Douban page may provide an
         # exact IMDb ID. Read that title page directly without another search.
         linked_id = next((r.get("imdb_id") for r in records if r.get("imdb_id")), None)
@@ -501,7 +508,8 @@ class MetadataResolver:
                     records.append(record)
                     LOG.info("Fetched IMDb metadata via the Douban-linked ID: %s", record["title"])
             except (MetadataError, ValueError, TypeError, KeyError, AttributeError) as exc:
-                LOG.warning("Douban-linked IMDb metadata unavailable: %s", exc)
+                LOG.warning("Douban-linked IMDb metadata unavailable: %s", exc,
+                            extra={"display_message": "IMDb: linked metadata unavailable; continuing without it."})
         enriched = dict(context)
         if records:
             enriched["catalog_metadata"] = records

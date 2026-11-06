@@ -80,7 +80,7 @@ llmsrt movie.mkv --provider custom --base-url https://your-gateway.example/v1 \
 
 仅 OpenAI 和 DeepSeek 提供内置预设。其他 `--provider` 名称均视为兼容 OpenAI 的自定义服务，必须指定 `--model`、`--base-url` 和 `--api-key-env`（也可通过对应配置项或环境变量提供）。内置预设使用固定模型名称，如需使用其他模型，可通过 `--model` 指定。
 
-翻译和俏皮话均关闭工具调用：OpenAI / DeepSeek 请求发送 `tool_choice: "none"`，自定义供应商省略该参数。`--extra-body` 不允许注入工具或联网搜索参数；IMDb / 豆瓣资料仍由程序单独获取。
+翻译和俏皮话均不声明工具，省略 `tools` 和 `tool_choice` 以兼容不同接口。`--extra-body` 不允许注入工具或联网搜索参数，工具调用响应会被拒绝；IMDb / 豆瓣资料仍由程序单独获取。
 
 ### 配置文件
 
@@ -155,7 +155,7 @@ llmsrt movie.mkv --asr --asr-model small --device cuda
 
 ### 进度显示
 
-交互式终端显示 spinner 和进度条，包含当前阶段、字幕数量、耗时、预计剩余时间及 token 用量。等待时默认由当前模型在后台生成俏皮话，失败时使用本地文案；`--no-model-quips` 或 `"model_quips": false` 可关闭这部分额外调用。文案只借用当前批次的氛围，不复述剧情，也不接收前情摘要。`--no-progress` 关闭进度，`--verbose` 查看请求明细。
+交互式终端显示 spinner 和进度条，包含当前阶段、字幕数量、耗时、预计剩余时间及 token 用量。提示信息使用不带自动高亮的紧凑单行，`--verbose` 查看完整诊断。等待时默认由当前模型在后台生成俏皮话，失败时使用本地文案；`--no-model-quips` 或 `"model_quips": false` 可关闭这部分额外调用。文案只借用当前批次的氛围，不复述剧情，也不接收前情摘要。`--no-progress` 关闭进度。
 
 重定向或管道输出时，改为每 5 秒输出普通文本状态（`--progress-interval`），可用 `| tee run.log` 保存日志。管道、离线模式和 `--no-progress` 均不调用俏皮话模型。
 
@@ -209,7 +209,7 @@ python3 -m pip install --user --upgrade llmsrt   # 或：pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.2`。
+如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.3`。
 
 **翻译准确性如何？**
 

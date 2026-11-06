@@ -1,6 +1,8 @@
+import io
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 import llmsrt
 
@@ -21,7 +23,7 @@ class ProviderRequestTests(unittest.TestCase):
                 self.assertEqual(args.model, llmsrt.PROVIDERS[provider]["model"])
                 self.assertEqual(args.base_url, llmsrt.PROVIDERS[provider]["base_url"])
 
-    def test_translation_and_quip_requests_disable_tools_only_for_known_providers(self):
+    def test_translation_and_quip_requests_omit_all_tool_parameters(self):
         for provider in ("openai", "deepseek", "custom", "local"):
             for prompt, limit in ((llmsrt.TRANSLATION_PROMPT, None), (llmsrt.QUIP_PROMPT, 1024)):
                 with self.subTest(provider=provider, prompt=prompt[:20]):
@@ -32,11 +34,7 @@ class ProviderRequestTests(unittest.TestCase):
                     with patch.dict("os.environ", {"LLMSRT_TEST_KEY": "test-key"}):
                         request, _ = llmsrt.make_llm_request(args, prompt, {"items": []}, token_limit=limit)
                     body = json.loads(request.data)
-                    if provider in {"openai", "deepseek"}:
-                        self.assertEqual(body["tool_choice"], "none")
-                    else:
-                        self.assertNotIn("tool_choice", body)
-                    for key in llmsrt.TOOL_PARAMETERS - {"tool_choice"}:
+                    for key in llmsrt.TOOL_PARAMETERS:
                         self.assertNotIn(key, body)
                     token_key = "max_completion_tokens" if provider == "openai" else "max_tokens"
                     self.assertEqual(body[token_key], args.max_tokens if limit is None else limit)
@@ -60,6 +58,23 @@ class ProviderRequestTests(unittest.TestCase):
                         self.args(provider, *extra, "--extra-body", json.dumps({key: "auto"}))
         args = self.args("deepseek", "--extra-body", '{"thinking":{"type":"disabled"}}')
         self.assertEqual(args.extra_body, {"thinking": {"type": "disabled"}})
+
+    def test_request_works_with_gateway_that_rejects_tool_choice_without_tools(self):
+        args = self.args()
+        translator = llmsrt.LLMTranslator(args, Mock())
+        result = {"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}
+
+        def gateway(request, **kwargs):
+            body = json.loads(request.data)
+            if "tool_choice" in body and not body.get("tools"):
+                raise HTTPError(request.full_url, 400, "invalid_request_error", {}, io.BytesIO(
+                    b"tool_choice is only allowed when tools are specified"))
+            return io.BytesIO(json.dumps(result).encode())
+
+        with patch.dict("os.environ", {"LLMSRT_TEST_KEY": "test-key"}), \
+                patch.object(translator.opener, "open", side_effect=gateway) as api:
+            self.assertEqual(translator.request({"items": [{"id": 1, "text": "Hello"}]}), result)
+        self.assertEqual(api.call_count, 1)
 
     def test_unexpected_tool_calls_are_rejected_even_with_valid_text(self):
         requested = [{"id": 1, "targets": ["ja"]}]
