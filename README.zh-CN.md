@@ -65,20 +65,21 @@ API 密钥通过环境变量读取，不会保存到配置文件或缓存中。
 | `--provider` | 默认模型 | 默认接口地址 | 密钥环境变量 |
 | --- | --- | --- | --- |
 | `openai`（默认） | `gpt-6-luna` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
-| `glm` | `glm-5.3-flash` | `https://open.bigmodel.cn/api/paas/v4` | `GLM_API_KEY` |
 | `deepseek` | `deepseek-flash` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
 
 ```bash
-export GLM_API_KEY='your-key'
-llmsrt movie.mkv --provider glm
+export DEEPSEEK_API_KEY='your-key'
+llmsrt movie.mkv --provider deepseek
 
 # 使用兼容 OpenAI 的 API 网关或自建服务
 export MY_LLM_KEY='your-key'
-llmsrt movie.mkv --base-url https://your-gateway.example/v1 \
+llmsrt movie.mkv --provider custom --base-url https://your-gateway.example/v1 \
   --api-key-env MY_LLM_KEY --model your-model
 ```
 
-内置预设使用固定的模型名称，不会自动切换到服务商的最新模型。如需使用其他模型，可通过 `--model` 指定。
+仅 OpenAI 和 DeepSeek 提供内置预设。其他 `--provider` 名称均视为兼容 OpenAI 的自定义服务，必须指定 `--model`、`--base-url` 和 `--api-key-env`（也可通过对应配置项或环境变量提供）。内置预设使用固定模型名称，如需使用其他模型，可通过 `--model` 指定。
+
+字幕翻译和模型俏皮话均关闭工具调用。`provider` 为 `openai` 或 `deepseek` 时，请求显式发送 `tool_choice: "none"`；其他供应商名称不携带该参数，以兼容不同接口。使用其他服务时，请明确指定自定义供应商名称，不要沿用默认的 `openai`。`--extra-body` 不允许注入工具或联网搜索参数，意外返回的工具调用会被拒绝。IMDb / 豆瓣资料仍由程序单独获取。
 
 ### 配置文件
 
@@ -86,9 +87,9 @@ llmsrt movie.mkv --base-url https://your-gateway.example/v1 \
 
 ```json
 {
-  "provider": "glm",
-  "model": "glm-5.3-flash",
-  "api_key_env": "GLM_API_KEY",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "api_key_env": "DEEPSEEK_API_KEY",
   "batch_size": 20
 }
 ```

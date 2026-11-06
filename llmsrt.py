@@ -42,9 +42,10 @@ BITMAP_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
 UNKNOWN_LANGUAGES = {"", "und", "unknown", "mul", "zxx"}
 PROVIDERS = {
     "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-6-luna", "api_key_env": "OPENAI_API_KEY"},
-    "glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-5.3-flash", "api_key_env": "GLM_API_KEY"},
     "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-flash", "api_key_env": "DEEPSEEK_API_KEY"},
 }
+TOOL_PARAMETERS = {"tools", "tool_choice", "functions", "function_call", "parallel_tool_calls",
+                   "web_search", "web_search_options"}
 CONFIG_KEYS = {
     "provider", "model", "base_url", "api_key_env", "batch_size", "batch_chars",
     "context_cues", "temperature", "max_tokens", "timeout", "retries",
@@ -742,6 +743,8 @@ def make_llm_request(args: argparse.Namespace, prompt: str, payload: dict[str, A
     limit_key = "max_completion_tokens" if args.provider == "openai" else "max_tokens"
     body[limit_key] = args.max_tokens if token_limit is None else token_limit
     body.update(args.extra_body)
+    if args.provider in {"openai", "deepseek"}:
+        body["tool_choice"] = "none"
     return urlrequest.Request(
         args.base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -755,6 +758,8 @@ def validate_model_quips(result: Any, sample: str) -> tuple[str, ...]:
     try:
         choice = result["choices"][0]
         if choice.get("finish_reason") not in {None, "stop"} or choice["message"].get("refusal"):
+            return ()
+        if choice["message"].get("tool_calls") or choice["message"].get("function_call"):
             return ()
         content = choice["message"]["content"]
         decoded = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip()))
@@ -935,6 +940,8 @@ class LLMTranslator:
             message = choice["message"]
             if not isinstance(message, dict):
                 raise InvalidLLMResponse("API response message is not an object")
+            if message.get("tool_calls") or message.get("function_call"):
+                raise LlmsrtError("Model returned a tool call, but tool use is disabled")
             if message.get("refusal"):
                 raise LlmsrtError("The model refused this translation request; check the provider response or choose another model")
             if choice.get("finish_reason") == "length":
@@ -1220,7 +1227,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--progress-interval", type=float, default=5, help="plain-text progress interval in seconds when output is redirected or piped")
     parser.add_argument("--model-quips", action=argparse.BooleanOptionalAction, default=True,
                         help="generate spoiler-conscious waiting quips with background model calls; --no-model-quips uses local messages only")
-    parser.add_argument("--provider", choices=tuple(PROVIDERS), default=os.environ.get("LLMSRT_PROVIDER", "openai"), help="translation provider")
+    parser.add_argument("--provider", default=os.environ.get("LLMSRT_PROVIDER", "openai"),
+                        help="provider name: openai/deepseek presets, or a custom OpenAI-compatible provider with explicit model, base URL and key variable")
     parser.add_argument("--model", default=os.environ.get("LLMSRT_MODEL"), help="model name; defaults to the provider preset")
     parser.add_argument("--base-url", default=os.environ.get("LLMSRT_BASE_URL"), help="API base URL, without /chat/completions")
     parser.add_argument("--api-key-env", default=os.environ.get("LLMSRT_API_KEY_ENV"), help="API key environment variable name; defaults per provider")
@@ -1288,12 +1296,17 @@ def configured_arguments(parser: argparse.ArgumentParser) -> argparse.Namespace:
 
 
 def configure_llm(args: argparse.Namespace) -> None:
-    if not isinstance(args.provider, str) or args.provider not in PROVIDERS:
-        raise LlmsrtError("provider must be openai, glm or deepseek")
-    profile = PROVIDERS[args.provider]
-    args.model = args.model or profile["model"]
-    args.base_url = args.base_url or profile["base_url"]
-    args.api_key_env = args.api_key_env or profile["api_key_env"]
+    if not isinstance(args.provider, str) or not args.provider.strip():
+        raise LlmsrtError("provider must be a non-empty name; built-in presets are openai and deepseek")
+    args.provider = args.provider.strip().lower()
+    profile = PROVIDERS.get(args.provider, {})
+    for name in ("model", "base_url", "api_key_env"):
+        setattr(args, name, getattr(args, name) or profile.get(name))
+    if not profile:
+        missing = ["--" + name.replace("_", "-") for name in ("model", "base_url", "api_key_env")
+                   if getattr(args, name) is None]
+        if missing:
+            raise LlmsrtError(f"Custom provider {args.provider!r} requires {', '.join(missing)}")
     for name in ("model", "base_url", "api_key_env"):
         if not isinstance(getattr(args, name), str) or not getattr(args, name).strip():
             raise LlmsrtError(f"{name} must be a non-empty string")
@@ -1326,6 +1339,8 @@ def configure_llm(args: argparse.Namespace) -> None:
             raise LlmsrtError(f"--extra-body is not valid JSON: {exc}") from exc
     if not isinstance(args.extra_body, dict):
         raise LlmsrtError("extra_body must be a JSON object")
+    if TOOL_PARAMETERS.intersection(args.extra_body):
+        raise LlmsrtError("extra_body must not include tool or web search parameters; tool use is disabled")
     forbidden = {"model", "messages", "stream", "response_format", "max_tokens", "max_completion_tokens", "temperature"}
     if forbidden.intersection(args.extra_body):
         raise LlmsrtError("extra_body must not override model, messages, stream, response_format, temperature or the token limit")

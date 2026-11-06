@@ -63,20 +63,21 @@ API keys come from environment variables and are never stored in the config or c
 | `--provider` | Default model | Default base URL | Key variable |
 | --- | --- | --- | --- |
 | `openai` (default) | `gpt-6-luna` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
-| `glm` | `glm-5.3-flash` | `https://open.bigmodel.cn/api/paas/v4` | `GLM_API_KEY` |
 | `deepseek` | `deepseek-flash` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
 
 ```bash
-export GLM_API_KEY='your-key'
-llmsrt movie.mkv --provider glm
+export DEEPSEEK_API_KEY='your-key'
+llmsrt movie.mkv --provider deepseek
 
 # Any OpenAI-compatible gateway or self-hosted endpoint
 export MY_LLM_KEY='your-key'
-llmsrt movie.mkv --base-url https://your-gateway.example/v1 \
+llmsrt movie.mkv --provider custom --base-url https://your-gateway.example/v1 \
   --api-key-env MY_LLM_KEY --model your-model
 ```
 
-Presets do not track each provider's newest models — pass `--model` for anything else.
+Only OpenAI and DeepSeek have built-in presets. Any other `--provider` name is treated as a custom OpenAI-compatible service and requires `--model`, `--base-url` and `--api-key-env` (or their config/environment equivalents). Presets use fixed model names; pass `--model` to select another model.
+
+Translation and model-generated quips both disable tool use. Requests with `provider` set to `openai` or `deepseek` explicitly send `tool_choice: "none"`; other provider names omit that parameter for compatibility. When using another service, set a custom provider name explicitly rather than keeping the default `openai`. Tool and web-search parameters cannot be injected via `--extra-body`, and unexpected tool-call responses are rejected. IMDb/Douban metadata retrieval remains a separate, program-controlled step.
 
 ### Config file
 
@@ -84,9 +85,9 @@ Presets do not track each provider's newest models — pass `--model` for anythi
 
 ```json
 {
-  "provider": "glm",
-  "model": "glm-5.3-flash",
-  "api_key_env": "GLM_API_KEY",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "api_key_env": "DEEPSEEK_API_KEY",
   "batch_size": 20
 }
 ```

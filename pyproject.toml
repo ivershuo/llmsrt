@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "ivershuo" }]
 keywords = [
     "subtitles", "subtitle-translation", "srt", "bilingual", "translation",
-    "llm", "openai", "deepseek", "glm", "ffmpeg", "whisper", "imdb", "douban",
+    "llm", "openai", "deepseek", "ffmpeg", "whisper", "imdb", "douban",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
