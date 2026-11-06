@@ -40,6 +40,7 @@ llmsrt movie.mkv --subtitle sub.en.srt --source en    # use a sidecar/OCR'd file
 llmsrt movie.mkv --subtitle sub.srt --source zh-cn --subtitle-encoding GB18030
 llmsrt movie.mkv -o result.srt          # explicit output file
 llmsrt movie.mkv --overwrite            # replace an existing output
+llmsrt movie.mkv --full-translation     # try all subtitles in one request
 ```
 
 - Without `--source`, embedded English subtitles are preferred; if unavailable, the first extractable embedded text track is tried, then sidecar files next to the video.
@@ -77,7 +78,7 @@ llmsrt movie.mkv --provider custom --base-url https://your-gateway.example/v1 \
 
 Only OpenAI and DeepSeek have built-in presets. Any other `--provider` name is treated as a custom OpenAI-compatible service and requires `--model`, `--base-url` and `--api-key-env` (or their config/environment equivalents). Presets use fixed model names; pass `--model` to select another model.
 
-Translation and model-generated quips both disable tool use. Requests with `provider` set to `openai` or `deepseek` explicitly send `tool_choice: "none"`; other provider names omit that parameter for compatibility. When using another service, set a custom provider name explicitly rather than keeping the default `openai`. Tool and web-search parameters cannot be injected via `--extra-body`, and unexpected tool-call responses are rejected. IMDb/Douban metadata retrieval remains a separate, program-controlled step.
+Translation and quips disable tool use: OpenAI/DeepSeek requests send `tool_choice: "none"`; custom providers omit it. Tool and web-search parameters are blocked in `--extra-body`. IMDb/Douban lookups remain separate.
 
 ### Config file
 
@@ -88,11 +89,11 @@ Translation and model-generated quips both disable tool use. Requests with `prov
   "provider": "deepseek",
   "model": "deepseek-flash",
   "api_key_env": "DEEPSEEK_API_KEY",
-  "batch_size": 20
+  "batch_size": 200
 }
 ```
 
-Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
+Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `full_translation`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
 
 **Use `llmsrt -h` for detailed usage help.**
 
@@ -136,23 +137,19 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 
 ### Batching, caching and offline mode
 
-- Batches: at most 20 entries (`--batch-size`) with a soft character cap (`--batch-chars`), 2 context entries each side (`--context-cues`); all target languages are requested in one call.
+- Batches: at most 200 entries (`--batch-size`), a soft cap of 24,000 source characters multiplied by missing target languages (`--batch-chars`), and 20 context entries each side (`--context-cues`).
+- `--full-translation` requests all missing translations at once with the complete source as context, ignoring batch limits and reusing cached results. Default: off; config: `"full_translation": true`. Choose `--max-tokens` and `--timeout` to fit your model; use normal batching if the complete source exceeds its context limit.
 - Results are validated (IDs, languages, non-empty text); truncated output splits into smaller batches, invalid results retry per `--retries`; a still-failing entry errors out rather than producing a misaligned subtitle.
-- `--no-json-mode` for models without `response_format`. Model-specific parameters go through `--extra-body`, e.g. `--extra-body '{"thinking":{"type":"disabled"}}'`, depending on what the model supports. `--max-tokens` defaults to 8192; raise it if a reasoning model's output is frequently truncated.
-- Translations are cached in `~/.cache/llmsrt/translations.sqlite3`; change the directory with `--cache-dir`. Completed translations are reused on the next run after an interruption. `--offline` uses only existing caches and downloaded speech-recognition models, making no network requests; missing cached translations are an error.
-- Rate limits and server errors back off and retry (`--retries`, `--timeout`, `--request-interval`); auth and parameter errors fail immediately.
+- Batches carry a rolling story summary (up to 600 characters) and a character/term glossary, updated in the same translation response and saved for resume. Dialogue and user notes take precedence. This internal memory stays out of subtitles and quip-model requests.
+- `--no-json-mode` for models without `response_format`. Model-specific parameters go through `--extra-body`, e.g. `--extra-body '{"thinking":{"type":"disabled"}}'`, depending on the model. `--max-tokens` defaults to 32,768, including thinking tokens; raise it within the model's limit or reduce batch size if output is truncated.
+- Translations are cached in `~/.cache/llmsrt/translations.sqlite3` (`--cache-dir`) and reused after interruptions. Earlier-format caches are not reused. `--offline` uses existing caches and downloaded ASR models only; missing translations are an error.
+- Rate limits and server errors back off and retry (`--retries`, `--request-interval`); auth and parameter errors fail immediately. Request timeout defaults to 600 seconds (`--timeout`).
 
 ### Progress
 
-In an interactive terminal, Rich displays an in-place spinner and progress bar with the current stage, subtitle count, elapsed time, estimated time remaining and cumulative token usage. Warnings and errors remain visible above the progress display; each file ends with a completion, skip or failure summary. Use `--verbose` for per-request token logs and debug details, or `--no-progress` to disable the progress display.
+Interactive terminals show a spinner and progress bar with stage, subtitle count, elapsed time, ETA and token usage. Waiting quips use the current model in the background by default, with local lines as fallback; `--no-model-quips` or `"model_quips": false` disables these extra calls. They draw on the current batch's atmosphere without quoting plot details; the story summary is not shared. Use `--no-progress` to hide progress or `--verbose` for request details.
 
-After 3 seconds of waiting, a short Chinese quip appears and rotates every 8 seconds. By default, a background request to the configured translation model generates mood-inspired quips from a small excerpt of the current batch. Translation continues in parallel; local quips fill the gap and remain the fallback on errors or rejected output. Requests are limited to one at a time and at most one per minute (or the longer `--request-interval`), with a maximum 15-second timeout, a 1024-token output budget and no retries. Received quip token usage is included in the file's token totals; a request already in flight may finish after the file ends.
-
-The quip model receives no title, synopsis, character notes or later subtitles. Its instructions restrict the humor to translation and broad atmosphere, without names, events, relationships, reveals or dialogue. A conservative output filter rejects story markers, copied Chinese text, names from the excerpt and terminal control characters; rejected or stale results are discarded. Quips only appear in the live terminal display and are cleared when the wait ends.
-
-Use `--no-model-quips` (or `"model_quips": false` in the config) to keep local quips without extra model calls. `--model-quips` re-enables generation. Offline mode, redirected/piped output and `--no-progress` also skip all quip model calls. Extraction and speech recognition use local quips until a translation batch is available.
-
-When redirected or piped (e.g. `| tee run.log`), output automatically switches to plain-text status lines without animations or ANSI colors. These print every 5 seconds and on stage changes; `--progress-interval` adjusts this plain-text interval. Logs continue to go to stdout.
+Redirected or piped output uses plain-text status lines every 5 seconds (`--progress-interval`), so `| tee run.log` works. Quip model calls are skipped for pipes, offline mode and `--no-progress`.
 
 ## FAQ
 

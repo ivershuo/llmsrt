@@ -20,11 +20,15 @@ class TranslationProgressTests(unittest.TestCase):
 
         def response(request, **kwargs):
             items = json.loads(request.data)["messages"][1]["content"]
+            payload = json.loads(items)
+            self.assertEqual(payload["previous_story"]["through_id"], payload["items"][0]["id"] - 1)
             translated = [{"id": item["id"], "translations": {"ja": f"訳文{item['id']}"}}
-                          for item in json.loads(items)["items"]]
+                          for item in payload["items"]]
             return io.BytesIO(json.dumps({
                 "choices": [{"finish_reason": "stop", "message": {
-                    "content": json.dumps({"items": translated})}}],
+                    "content": json.dumps({"items": translated, "story_update": {
+                        "summary": "INTERNAL_STORY_ONLY", "characters": {}, "terms": {},
+                    }})}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 20},
             }).encode())
 
@@ -68,6 +72,8 @@ class TranslationProgressTests(unittest.TestCase):
                     plain = Text.from_ansi(text).plain
                     self.assertIn("Completed 1, skipped 0, failed 0", plain)
                     self.assertNotIn("tokens this call", plain)
+                    self.assertNotIn("INTERNAL_STORY_ONLY", plain)
+                    self.assertNotIn("INTERNAL_STORY_ONLY", destination.read_text())
                     if mode != "disabled":
                         self.assertIn("tokens 200 in / 40 out", plain)
                     if mode not in {"terminal", "local"}:
