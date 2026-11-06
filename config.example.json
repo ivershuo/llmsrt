@@ -16,6 +16,7 @@
   "metadata_refresh": false,
   "progress": true,
   "progress_interval": 5,
+  "model_quips": true,
   "batch_size": 20,
   "batch_chars": 4000,
   "context_cues": 2,

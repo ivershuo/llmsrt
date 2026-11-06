@@ -7,7 +7,7 @@ from unittest.mock import patch
 from rich.console import Console
 from rich.logging import RichHandler
 
-from llmsrt import LOG, ProgressReporter
+from llmsrt import LOG, QUIP_DELAY, QUIP_INTERVAL, WAITING_QUIPS, ProgressReporter, subtitle_quips
 
 
 class ProgressTests(unittest.TestCase):
@@ -120,6 +120,64 @@ class ProgressTests(unittest.TestCase):
                       {"prompt_tokens": -1, "completion_tokens": True}):
             progress.record_usage(usage)
         self.assertEqual((progress.input_tokens, progress.output_tokens), (30, 5))
+
+    def test_quips_rotate_after_delay_and_clear_when_wait_ends(self):
+        progress, _ = self.reporter()
+        with patch("llmsrt.time.monotonic", return_value=100):
+            with progress.waiting(["Hello, Morgan. The secret ending is SPOILER_123."]):
+                self.assertIsNone(progress.waiting_quip(100 + QUIP_DELAY - 0.1))
+                first = progress.waiting_quip(100 + QUIP_DELAY)
+                self.assertEqual(first, "一句你好，也有好几种打开方式。")
+                self.assertEqual(progress.waiting_quip(100 + QUIP_DELAY + QUIP_INTERVAL - 0.1), first)
+                self.assertNotEqual(progress.waiting_quip(100 + QUIP_DELAY + QUIP_INTERVAL), first)
+                for second in range(3, 200):
+                    quip = progress.waiting_quip(100 + second)
+                    self.assertNotIn("Morgan", quip)
+                    self.assertNotIn("SPOILER_123", quip)
+            self.assertIsNone(progress.waiting_quip(1000))
+            with progress.waiting(["Hello again"]):
+                self.assertNotEqual(progress.waiting_quip(100 + QUIP_DELAY), first)
+
+    def test_waiting_clears_after_exception_and_interrupt(self):
+        for error in (RuntimeError, KeyboardInterrupt):
+            with self.subTest(error=error):
+                progress, _ = self.reporter()
+                with self.assertRaises(error):
+                    with progress.waiting(["coffee"]):
+                        raise error()
+                self.assertIsNone(progress.wait_started)
+
+    def test_quip_themes_are_fixed_and_unknown_text_uses_generic_pool(self):
+        self.assertEqual(subtitle_quips(["The ending: SPOILER_123"]), WAITING_QUIPS)
+        for text in ("Coffee?", "泡茶", "你好", "thanks", "抱歉"):
+            with self.subTest(text=text):
+                self.assertGreater(len(subtitle_quips([text])), len(WAITING_QUIPS))
+        self.assertEqual(subtitle_quips(["The sheriff arrived"]), WAITING_QUIPS)
+
+    def test_quips_only_appear_in_live_display(self):
+        for terminal in (True, False):
+            with self.subTest(terminal=terminal):
+                progress, output = self.reporter(terminal=terminal)
+                with self.assertLogs(LOG, logging.INFO) as logs, progress:
+                    progress.set_stage("translating subtitles", total=2)
+                    LOG.info("Waiting for the translation request")
+                    with progress.waiting(["Coffee?"]):
+                        now = progress.wait_started + QUIP_DELAY
+                        with patch("llmsrt.time.monotonic", return_value=now):
+                            if terminal:
+                                progress.live.refresh()
+                            else:
+                                progress.emit()
+                self.assertNotIn("给译文磨豆中", "\n".join(logs.output))
+                self.assertEqual("给译文磨豆中" in output.getvalue(), terminal)
+
+    def test_asr_has_generic_quips_and_writing_has_none(self):
+        progress, _ = self.reporter()
+        with patch("llmsrt.time.monotonic", return_value=100):
+            progress.set_stage("transcribing speech", total=60, unit="seconds")
+            self.assertEqual(progress.waiting_quip(100 + QUIP_DELAY), WAITING_QUIPS[0])
+            progress.set_stage("writing subtitles", total=2)
+            self.assertIsNone(progress.waiting_quip(1000))
 
 
 if __name__ == "__main__":

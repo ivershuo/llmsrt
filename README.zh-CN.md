@@ -95,7 +95,7 @@ llmsrt movie.mkv --base-url https://your-gateway.example/v1 \
 
 配置优先级为：**命令行参数 > 配置文件 > `LLMSRT_*` 环境变量 > 内置预设**。通过 `--config path` 或 `LLMSRT_CONFIG` 可指定其他配置文件。每次只加载一个配置文件，不会合并多个文件的内容。
 
-支持的配置项：`provider`、`model`、`base_url`、`api_key_env`、`batch_size`、`batch_chars`、`context_cues`、`temperature`、`max_tokens`、`timeout`、`retries`、`request_interval`、`json_mode`、`extra_body`、`title`、`media_type`、`year`、`season`、`episode`、`media_context`、`media_context_file`、`characters`、`progress`、`progress_interval`、`metadata`、`metadata_sources`、`imdb`、`douban`、`metadata_timeout`、`metadata_cache_days`、`metadata_refresh`。
+支持的配置项：`provider`、`model`、`base_url`、`api_key_env`、`batch_size`、`batch_chars`、`context_cues`、`temperature`、`max_tokens`、`timeout`、`retries`、`request_interval`、`json_mode`、`extra_body`、`title`、`media_type`、`year`、`season`、`episode`、`media_context`、`media_context_file`、`characters`、`progress`、`progress_interval`、`model_quips`、`metadata`、`metadata_sources`、`imdb`、`douban`、`metadata_timeout`、`metadata_cache_days`、`metadata_refresh`。
 
 **使用`llmsrt -h`查看具体使用帮助。**
 
@@ -152,6 +152,12 @@ llmsrt movie.mkv --asr --asr-model small --device cuda
 ### 进度显示
 
 在交互式终端中，使用 Rich 原地刷新 spinner 和进度条，显示当前阶段、已处理字幕数、耗时、预计剩余时间和累计 token 用量。警告和错误保留在进度区上方，每个文件结束后显示完成、跳过或失败摘要。可用 `--verbose` 查看每次请求的 token 日志和调试信息，或用 `--no-progress` 关闭进度显示。
+
+等待超过 3 秒时，会显示一条中文俏皮话，每 8 秒轮换。默认使用当前翻译模型，在后台根据当前批次的一小段字幕生成贴合氛围的文案，与翻译并行进行。模型返回前先显示本地文案；生成失败或结果被过滤时，也继续使用本地文案。后台最多同时运行一个请求，最多每分钟调用一次（若 `--request-interval` 更长则遵循该间隔），超时最长 15 秒，输出预算最多 1024 token，不重试。已收到响应的俏皮话 token 用量计入该文件的累计用量；文件结束时已发出的请求仍可能稍后完成。
+
+俏皮话模型不接收片名、剧情简介、人物说明或后续字幕。提示词要求只借用整体氛围，围绕翻译工作打趣，不描述人物、事件、关系、悬念、结局或复述台词。输出还会经过保守过滤，拒绝剧情提示词、与源文重合的中文片段、源文中的姓名和终端控制字符；不合规则或来自上一批次的迟到结果会被丢弃。俏皮话仅在终端进度区显示，等待结束后清除。
+
+使用 `--no-model-quips` 或在配置中设置 `"model_quips": false`，可保留本地俏皮话并关闭额外模型调用；`--model-quips` 可重新开启。离线模式、管道或重定向输出，以及 `--no-progress`，均不调用俏皮话模型。提取字幕、语音识别等阶段仍使用本地文案。
 
 重定向或通过管道输出时（例如 `| tee run.log`），自动切换为不带动画和 ANSI 颜色的普通文本日志。默认每 5 秒输出一次进度，阶段变化时立即输出；`--progress-interval` 用于调整普通文本的输出间隔。日志仍写入标准输出。
 

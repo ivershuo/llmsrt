@@ -91,7 +91,7 @@ Presets do not track each provider's newest models — pass `--model` for anythi
 }
 ```
 
-Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
+Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
 
 **Use `llmsrt -h` for detailed usage help.**
 
@@ -144,6 +144,12 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 ### Progress
 
 In an interactive terminal, Rich displays an in-place spinner and progress bar with the current stage, subtitle count, elapsed time, estimated time remaining and cumulative token usage. Warnings and errors remain visible above the progress display; each file ends with a completion, skip or failure summary. Use `--verbose` for per-request token logs and debug details, or `--no-progress` to disable the progress display.
+
+After 3 seconds of waiting, a short Chinese quip appears and rotates every 8 seconds. By default, a background request to the configured translation model generates mood-inspired quips from a small excerpt of the current batch. Translation continues in parallel; local quips fill the gap and remain the fallback on errors or rejected output. Requests are limited to one at a time and at most one per minute (or the longer `--request-interval`), with a maximum 15-second timeout, a 1024-token output budget and no retries. Received quip token usage is included in the file's token totals; a request already in flight may finish after the file ends.
+
+The quip model receives no title, synopsis, character notes or later subtitles. Its instructions restrict the humor to translation and broad atmosphere, without names, events, relationships, reveals or dialogue. A conservative output filter rejects story markers, copied Chinese text, names from the excerpt and terminal control characters; rejected or stale results are discarded. Quips only appear in the live terminal display and are cleared when the wait ends.
+
+Use `--no-model-quips` (or `"model_quips": false` in the config) to keep local quips without extra model calls. `--model-quips` re-enables generation. Offline mode, redirected/piped output and `--no-progress` also skip all quip model calls. Extraction and speech recognition use local quips until a translation batch is available.
 
 When redirected or piped (e.g. `| tee run.log`), output automatically switches to plain-text status lines without animations or ANSI colors. These print every 5 seconds and on stage changes; `--progress-interval` adjusts this plain-text interval. Logs continue to go to stdout.
 
