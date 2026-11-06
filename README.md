@@ -143,7 +143,9 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 
 ### Progress
 
-One status line prints every 5 seconds and on stage changes (`--progress-interval`, `--no-progress`). Logs go to stdout with flushed lines, so `| tee run.log` works.
+In an interactive terminal, Rich displays an in-place spinner and progress bar with the current stage, subtitle count, elapsed time, estimated time remaining and cumulative token usage. Warnings and errors remain visible above the progress display; each file ends with a completion, skip or failure summary. Use `--verbose` for per-request token logs and debug details, or `--no-progress` to disable the progress display.
+
+When redirected or piped (e.g. `| tee run.log`), output automatically switches to plain-text status lines without animations or ANSI colors. These print every 5 seconds and on stage changes; `--progress-interval` adjusts this plain-text interval. Logs continue to go to stdout.
 
 ## FAQ
 

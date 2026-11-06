@@ -93,10 +93,10 @@ def format_duration(seconds: float) -> str:
 
 
 class ProgressReporter:
-    """Print flushed progress lines even while a blocking operation is running."""
+    """Refresh terminal progress in place, with plain heartbeat logs for pipes."""
 
     def __init__(self, filename: str, file_index: int, file_total: int,
-                 *, interval: float, enabled: bool):
+                 *, interval: float, enabled: bool, console: Any = None):
         self.label = f"[file {file_index}/{file_total}] {filename}"
         self.interval = interval
         self.enabled = enabled
@@ -110,12 +110,27 @@ class ProgressReporter:
         self.completed = self.baseline = 0.0
         self.unit = "entries"
         self.finished = False
+        self.console = console
+        self.live: Any = None
+        self.spinner: Any = None
+        self.input_tokens = self.output_tokens = 0
 
     def __enter__(self) -> ProgressReporter:
-        self.emit()
         if self.enabled:
-            self.thread = threading.Thread(target=self.heartbeat, daemon=True)
-            self.thread.start()
+            if self.console is None:
+                self.console = dependency("rich.console").Console(file=sys.stdout, highlight=False)
+            if self.console.is_terminal and not self.console.is_dumb_terminal:
+                from rich.live import Live
+                from rich.spinner import Spinner
+
+                self.spinner = Spinner("dots", style="cyan")
+                self.live = Live(console=self.console, get_renderable=self.render,
+                                 refresh_per_second=8, transient=True)
+                self.live.start(refresh=True)
+            else:
+                self.emit()
+                self.thread = threading.Thread(target=self.heartbeat, daemon=True)
+                self.thread.start()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -123,6 +138,55 @@ class ProgressReporter:
         self.finish(status)
         if self.thread is not None:
             self.thread.join(timeout=1)
+
+    def eta(self, elapsed: float) -> str:
+        processed = self.completed - self.baseline
+        remaining = max(0, self.total - self.completed) if self.total is not None else None
+        if remaining == 0:
+            return "00:00:00"
+        return format_duration(elapsed * remaining / processed) if remaining is not None and processed > 0 else "estimating"
+
+    def render(self) -> Any:
+        from rich.console import Group
+        from rich.progress_bar import ProgressBar
+        from rich.table import Table
+        from rich.text import Text
+
+        with self.lock:
+            elapsed = time.monotonic() - self.stage_started
+            header = Text(self.label, style="bold", overflow="ellipsis", no_wrap=True)
+            stage = Table.grid(padding=(0, 1))
+            stage.add_column(width=2)
+            stage.add_column()
+            stage.add_row(self.spinner, Text(self.stage, style="cyan"))
+            rows = [header, stage]
+            if self.total is not None:
+                percent = 100 * self.completed / self.total if self.total else 100
+                bar = Table.grid(padding=(0, 1), expand=True)
+                bar.add_column(ratio=1)
+                bar.add_column(no_wrap=True)
+                bar.add_row(
+                    ProgressBar(total=self.total or 1, completed=self.completed if self.total else 1,
+                                complete_style="cyan", finished_style="green"),
+                    Text(f"{self.completed:g}/{self.total:g} {self.unit} ({percent:.1f}%)"),
+                )
+                rows.append(bar)
+            if self.detail:
+                rows.append(Text(self.detail, style="dim", overflow="ellipsis", no_wrap=True))
+            timing = f"Elapsed {format_duration(time.monotonic() - self.started)}"
+            if self.total is not None:
+                timing += f"  ·  ETA {self.eta(elapsed)}"
+            if self.input_tokens or self.output_tokens:
+                timing += f"  ·  Tokens {self.input_tokens:,} in / {self.output_tokens:,} out"
+            rows.append(Text(timing, style="dim", overflow="ellipsis", no_wrap=True))
+            return Group(*rows)
+
+    def record_usage(self, usage: dict[str, Any]) -> None:
+        with self.lock:
+            for key, attribute in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    setattr(self, attribute, getattr(self, attribute) + value)
 
     def heartbeat(self) -> None:
         while not self.stop.wait(self.interval):
@@ -152,7 +216,7 @@ class ProgressReporter:
             self.emit()
 
     def emit(self) -> None:
-        if not self.enabled:
+        if not self.enabled or self.live is not None:
             return
         with self.lock:
             if self.finished:
@@ -162,12 +226,7 @@ class ProgressReporter:
             if self.total is not None:
                 percent = 100 * self.completed / self.total if self.total else 100
                 parts.append(f"{self.completed:g}/{self.total:g} {self.unit} ({percent:.1f}%)")
-                processed = self.completed - self.baseline
-                remaining = max(0, self.total - self.completed)
-                eta = format_duration(elapsed * remaining / processed) if processed > 0 else "estimating"
-                if remaining == 0:
-                    eta = "00:00:00"
-                parts.append(f"ETA {eta}")
+                parts.append(f"ETA {self.eta(elapsed)}")
             parts.append(f"stage elapsed {format_duration(elapsed)}")
             if self.detail:
                 parts.append(self.detail)
@@ -179,9 +238,23 @@ class ProgressReporter:
                 return
             self.finished = True
             self.stop.set()
-            if self.enabled:
-                LOG.info("%s | %s | file elapsed %s", self.label, status,
-                         format_duration(time.monotonic() - self.started))
+        # Live's refresh thread also takes self.lock; stop it outside the lock.
+        if self.live is not None:
+            self.live.stop()
+        if self.enabled:
+            elapsed = format_duration(time.monotonic() - self.started)
+            tokens = (f" | tokens {self.input_tokens:,} in / {self.output_tokens:,} out"
+                      if self.input_tokens or self.output_tokens else "")
+            if self.live is not None:
+                from rich.text import Text
+
+                symbol, style = {"done": ("✓", "green"), "skipped": ("−", "yellow"),
+                                 "interrupted": ("!", "yellow"), "failed": ("✗", "red")}[status]
+                result = Text(f"{symbol} ", style=style)
+                result.append(f"{self.label} · {status} · {elapsed}{tokens}")
+                self.console.print(result)
+            else:
+                LOG.info("%s | %s | file elapsed %s%s", self.label, status, elapsed, tokens)
 
 
 def dependency(name: str) -> Any:
@@ -614,8 +687,10 @@ class LLMTranslator:
                     raise InvalidLLMResponse("API response is not a JSON object")
                 usage = result.get("usage")
                 if isinstance(usage, dict):
-                    LOG.info("Model %s, tokens this call: input %s, output %s", args.model,
+                    LOG.debug("Model %s, tokens this call: input %s, output %s", args.model,
                              usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"))
+                    if self.progress:
+                        self.progress.record_usage(usage)
                 if self.progress:
                     self.progress.update(detail="model responded; validating and caching translations")
                 return result
@@ -927,8 +1002,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metadata-timeout", type=float, default=15, help="timeout in seconds per metadata request")
     parser.add_argument("--metadata-cache-days", type=float, default=30, help="metadata cache validity in days; offline mode may use expired entries")
     parser.add_argument("--metadata-refresh", action="store_true", help="ignore the on-disk metadata cache and re-fetch; results are still reused within one run")
-    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="live progress output; disable timed progress with --no-progress")
-    parser.add_argument("--progress-interval", type=float, default=5, help="progress refresh interval in seconds while waiting on the API, extraction or ASR")
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, help="live terminal progress with spinner and progress bar; disable with --no-progress")
+    parser.add_argument("--progress-interval", type=float, default=5, help="plain-text progress interval in seconds when output is redirected or piped")
     parser.add_argument("--provider", choices=tuple(PROVIDERS), default=os.environ.get("LLMSRT_PROVIDER", "openai"), help="translation provider")
     parser.add_argument("--model", default=os.environ.get("LLMSRT_MODEL"), help="model name; defaults to the provider preset")
     parser.add_argument("--base-url", default=os.environ.get("LLMSRT_BASE_URL"), help="API base URL, without /chat/completions")
@@ -962,7 +1037,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu-threads", type=int, default=4, help="speech recognition CPU threads")
     parser.add_argument("--offline", action="store_true", help="use only metadata/translation caches and already-downloaded models; no network requests, API calls or model downloads")
     parser.add_argument("--cache-dir", default=str(Path.home() / ".cache" / "llmsrt"), help="persistent translation cache directory")
-    parser.add_argument("--verbose", action="store_true", help="show full stack traces on errors")
+    parser.add_argument("--verbose", action="store_true", help="show debug logs, per-request token usage and full stack traces on errors")
     return parser
 
 
@@ -1107,6 +1182,16 @@ def main() -> int:
                         format="%(levelname)s: %(message)s", stream=sys.stdout)
     cache = None
     try:
+        console = dependency("rich.console").Console(file=sys.stdout, highlight=False)
+        if console.is_terminal and not console.is_dumb_terminal:
+            from rich.logging import RichHandler
+
+            logging.basicConfig(
+                level=logging.DEBUG if args.verbose else logging.INFO,
+                format="%(message)s", force=True,
+                handlers=[RichHandler(console=console, show_time=False, show_path=False,
+                                      markup=False, highlighter=None)],
+            )
         if args.cpu_threads < 1:
             raise LlmsrtError("--cpu-threads must be greater than 0")
         for name in ("ffmpeg", "ffprobe"):
@@ -1153,7 +1238,8 @@ def main() -> int:
         for file_index, video in enumerate(videos, 1):
             try:
                 with ProgressReporter(video.name, file_index, len(videos),
-                                      interval=args.progress_interval, enabled=args.progress) as progress:
+                                      interval=args.progress_interval, enabled=args.progress,
+                                      console=console) as progress:
                     destination = output_path(video, root, args)
                     if process_video(video, destination, args, translator, recognizer, metadata, progress):
                         completed += 1
