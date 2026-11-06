@@ -209,7 +209,7 @@ python3 -m pip install --user --upgrade llmsrt   # 或：pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.1`。
+如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.2`。
 
 **翻译准确性如何？**
 

@@ -189,7 +189,7 @@ python3 -m pip install --user --upgrade llmsrt   # or: pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-Append `@v0.1.1` to the git URL to pin a release tag.
+Append `@v0.1.2` to the git URL to pin a release tag.
 
 **How accurate is the translation?** — speech recognition can miss or mishear dialogue, and LLMs can mistranslate names, slang or context. The tool validates subtitle structure and entry correspondence, but cannot guarantee the translations are fully accurate.
 

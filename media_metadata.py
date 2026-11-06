@@ -342,7 +342,7 @@ class MetadataResolver:
         progress.update(detail=f"fetching metadata: {url}", emit=True)
         self.last_request = time.monotonic()
         req = request.Request(url, headers={
-            "User-Agent": "llmsrt/0.1.0 (subtitle background metadata)",
+            "User-Agent": "llmsrt/0.1.2 (subtitle background metadata)",
             "Accept": "text/html,application/json", "Accept-Language": "zh-CN,en;q=0.8",
         })
         try:
