@@ -51,7 +51,7 @@ class StoryContextTests(unittest.TestCase):
         return translator.translate_cues(self.cues if cues is None else cues, "en", ["ja", "en"],
                                          self.context, progress)
 
-    def test_story_and_glossary_flow_between_batches_and_survive_cache_reopen(self):
+    def test_story_flows_between_batches_and_only_translations_survive_reopen(self):
         translator = self.translator()
         payloads = []
 
@@ -77,16 +77,18 @@ class StoryContextTests(unittest.TestCase):
         self.assertEqual(translator.story["terms"]["Aurora"]["ja"], "オーロラ")
         self.assertEqual([entry["ja"] for entry in output], [f"訳文{i}" for i in range(1, 5)])
         self.assertEqual([entry["en"] for entry in output], [cue.content for cue in self.cues])
+        tables = self.cache.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        self.assertEqual(tables, [("translations",)])
         self.cache.close()
         self.cache = llmsrt.TranslationCache(self.cache_path)
         resumed = self.translator()
         self.args.offline = True
         with patch.object(resumed, "request", side_effect=AssertionError("cache miss")):
             self.assertEqual(self.run_translation(resumed), output)
-        self.assertEqual(resumed.story, translator.story)
-        self.assertEqual(resumed.story_through, 4)
+        self.assertEqual(resumed.story, llmsrt.empty_story())
+        self.assertEqual(resumed.story_through, 0)
 
-    def test_resume_uses_only_checkpoint_before_first_missing_subtitle(self):
+    def test_resume_reuses_translations_without_loading_legacy_story(self):
         translator = self.translator()
         first = memory("已经介绍工作。", characters={"Alice": {"ja": "アリス"}})
         calls = 0
@@ -101,8 +103,14 @@ class StoryContextTests(unittest.TestCase):
         with patch.object(translator, "request", side_effect=interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 self.run_translation(translator)
-        # A later checkpoint must not leak into an earlier missing batch.
-        self.cache.save_batch({}, translator.session_key, 4, memory("FUTURE_SECRET"))
+        # Simulate an existing database with a story saved at the resume point.
+        legacy_row = (translator.session_key, 2, json.dumps(first))
+        with self.cache.connection:
+            self.cache.connection.execute(
+                "CREATE TABLE story_contexts (session_key TEXT, through_id INTEGER, context TEXT, "
+                "PRIMARY KEY (session_key, through_id))"
+            )
+            self.cache.connection.execute("INSERT INTO story_contexts VALUES (?, ?, ?)", legacy_row)
         resumed = self.translator()
         payloads = []
 
@@ -111,11 +119,12 @@ class StoryContextTests(unittest.TestCase):
             return response(payload, memory("已经约好见面。"))
 
         with patch.object(resumed, "request", side_effect=complete) as api:
-            self.run_translation(resumed)
+            output = self.run_translation(resumed)
             self.assertEqual(api.call_count, 1)
         self.assertEqual([item["id"] for item in payloads[0]["items"]], [3, 4])
-        self.assertEqual(payloads[0]["previous_story"], {"through_id": 2, **first})
-        self.assertNotIn("FUTURE_SECRET", json.dumps(payloads))
+        self.assertEqual(payloads[0]["previous_story"], {"through_id": 0, **llmsrt.empty_story()})
+        self.assertEqual([entry["ja"] for entry in output], [f"訳文{i}" for i in range(1, 5)])
+        self.assertEqual(self.cache.connection.execute("SELECT * FROM story_contexts").fetchall(), [legacy_row])
 
     def test_truncated_parent_does_not_publish_memory_and_children_advance_in_order(self):
         self.args.batch_size = 4
@@ -134,9 +143,9 @@ class StoryContextTests(unittest.TestCase):
         self.assertEqual(payloads[1]["previous_story"]["through_id"], 0)
         self.assertEqual(payloads[2]["previous_story"]["through_id"], 2)
         self.assertNotIn("UNVALIDATED_SECRET", json.dumps(payloads))
-        self.assertEqual(self.cache.connection.execute("SELECT COUNT(*) FROM story_contexts").fetchone()[0], 2)
+        self.assertEqual(translator.story_through, 4)
 
-    def test_invalid_translations_never_commit_their_summary(self):
+    def test_invalid_translations_never_update_the_summary(self):
         self.args.batch_size = 1
         translator = self.translator()
         bad = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
@@ -145,8 +154,7 @@ class StoryContextTests(unittest.TestCase):
         with patch.object(translator, "request", return_value=bad):
             with self.assertRaises(llmsrt.LlmsrtError):
                 self.run_translation(translator)
-        for table in ("translations", "story_contexts"):
-            self.assertEqual(self.cache.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+        self.assertEqual(self.cache.connection.execute("SELECT COUNT(*) FROM translations").fetchone()[0], 0)
         self.assertEqual(translator.story, llmsrt.empty_story())
 
     def test_invalid_memory_keeps_translations_and_previous_summary(self):
@@ -206,24 +214,15 @@ class StoryContextTests(unittest.TestCase):
         self.assertEqual(len(merged["characters"]), 32)
         self.assertNotIn("New", merged["characters"])
 
-    def test_translation_and_memory_transaction_rolls_back_together(self):
+    def test_failed_cache_write_rolls_back_the_whole_translation_batch(self):
         self.cache.connection.execute(
-            "CREATE TRIGGER reject_memory BEFORE INSERT ON story_contexts "
+            "CREATE TRIGGER reject_translation BEFORE INSERT ON translations WHEN NEW.cache_key = 'reject' "
             "BEGIN SELECT RAISE(ABORT, 'test failure'); END"
         )
         with self.assertRaises(sqlite3.IntegrityError):
-            self.cache.save_batch({"key": "translation"}, "session", 1, memory("摘要"))
+            self.cache.save_batch({"key": "translation", "reject": "another translation"})
         self.assertIsNone(self.cache.get("key"))
-        self.assertIsNone(self.cache.get_story("session", 2))
-
-    def test_corrupt_checkpoint_falls_back_to_earlier_valid_memory(self):
-        translator = self.translator()
-        translator.session_key, translator.targets = "session", ["ja"]
-        self.cache.save_batch({}, "session", 1, memory("已知前情。"))
-        self.cache.save_batch({}, "session", 2, {"summary": 123})
-        translator.restore_story(3)
-        self.assertEqual(translator.story_through, 1)
-        self.assertEqual(translator.story["summary"], "已知前情。")
+        self.assertIsNone(self.cache.get("reject"))
 
     def test_chinese_glossary_uses_same_script_conversion_as_subtitles(self):
         translator = self.translator()
@@ -303,7 +302,7 @@ class StoryContextTests(unittest.TestCase):
             self.assertEqual(api.call_count, 1)
         self.assertEqual([item["id"] for item in payloads[0]["items"]], [2, 3])
         self.assertEqual([item["id"] for item in payloads[0]["context_only"]], [1, 4])
-        self.assertEqual(payloads[0]["previous_story"]["through_id"], 1)
+        self.assertEqual(payloads[0]["previous_story"], {"through_id": 0, **llmsrt.empty_story()})
 
     def test_full_translation_still_splits_truncated_output(self):
         self.args.full_translation = True

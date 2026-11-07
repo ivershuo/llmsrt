@@ -150,9 +150,10 @@ llmsrt movie.mkv --asr --asr-model small --device cuda
 - 默认每批最多 200 条字幕（`--batch-size`），字符参考上限为 24,000（`--batch-chars`，按源文字符数乘以缺失目标语言数量累计），前后各附带 20 条上下文（`--context-cues`）。
 - `--full-translation` 将全部缺失译文放入一次请求，以完整源文作为上下文，忽略分批限制并复用已有缓存。默认关闭，也可配置 `"full_translation": true`。请按模型能力设置 `--max-tokens` 和 `--timeout`；完整源文超过上下文限制时，应使用普通分批。
 - 程序会检查字幕编号、目标语言和非空译文。输出截断时自动拆批，格式不合格时按 `--retries` 重试；单条字幕仍失败时会报错，避免生成错位或缺失的字幕。
-- 每批附带前情摘要（最多 600 字）和人物、术语表，由同一次翻译响应更新并保存，支持断点恢复。原文和用户说明优先；内部摘要不会写入字幕，也不传给俏皮话模型。
+- 每批附带前情摘要（最多 600 字）和人物、术语表，在当前视频的运行内存中更新，重启续跑时从空白开始。原文和用户说明优先；这些上下文不会写入字幕，也不传给俏皮话模型。
 - 不支持 `response_format` 的模型可用 `--no-json-mode`。模型专用参数通过 `--extra-body` 传入，例如 `--extra-body '{"thinking":{"type":"disabled"}}'`，以模型支持情况为准。`--max-tokens` 默认为 32,768，包含思考 token；输出截断时可在模型允许的范围内调高，或减少每批条数。
-- 译文缓存在 `~/.cache/llmsrt/translations.sqlite3`（`--cache-dir`），中断后可复用；旧格式缓存不复用。`--offline` 仅使用已有缓存和已下载的语音识别模型，缺少译文缓存时会报错。
+- 译文默认缓存在系统临时目录下的用户专属目录，用于断点续跑。可通过 `--cache-dir` 指定缓存位置。`--offline` 在需要模型译文时依赖已有缓存。
+- `llmsrt --clear-cache` 清理译文和作品资料缓存，包括旧默认译文库，并压缩数据库。加 `--cache-dir` 时只清理指定目录。
 - 限流或服务器错误会退避重试（`--retries`、`--request-interval`），并发翻译共享请求间隔；鉴权或参数错误直接报错。请求超时默认为 600 秒（`--timeout`）。
 
 ### 进度显示
@@ -213,7 +214,7 @@ python3 -m pip install --user --upgrade llmsrt   # 或：pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.5`。
+如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.2.0`。
 
 **翻译准确性如何？**
 

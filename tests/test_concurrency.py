@@ -88,9 +88,8 @@ class ConcurrencyTests(unittest.TestCase):
                         if video == videos[6]:
                             raise llmsrt.LlmsrtError("one video failed")
                         translator.story["summary"] = video.name
-                        translator.cache.save_batch({video.name: video.name}, video.name, 1, translator.story)
+                        translator.cache.save_batch({video.name: video.name})
                         self.assertEqual(translator.cache.get(video.name), video.name)
-                        self.assertEqual(translator.cache.get_story(video.name, 2)[1]["summary"], video.name)
                         return True
                     finally:
                         with lock:

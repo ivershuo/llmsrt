@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
@@ -24,7 +24,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
-import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -37,8 +37,14 @@ from urllib import request as urlrequest
 
 from media_metadata import SOURCES, MetadataError, MetadataResolver, canonical_url, filename_hints
 
+try:
+    import sqlite3
+except ImportError:
+    sqlite3 = None
+
 
 LOG = logging.getLogger("llmsrt")
+SQLITE_ERRORS = (sqlite3.Error,) if sqlite3 is not None else ()
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".m4v", ".ts", ".m2ts"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 BITMAP_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
@@ -992,15 +998,10 @@ class SpeechRecognizer:
 
 class TranslationCache:
     def __init__(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.connection = sqlite3.connect(str(path), timeout=60)
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS translations (cache_key TEXT PRIMARY KEY, result TEXT NOT NULL)"
-        )
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS story_contexts ("
-            "session_key TEXT NOT NULL, through_id INTEGER NOT NULL, context TEXT NOT NULL, "
-            "PRIMARY KEY (session_key, through_id))"
         )
         self.connection.commit()
 
@@ -1012,36 +1013,64 @@ class TranslationCache:
         self.connection.execute("INSERT OR REPLACE INTO translations VALUES (?, ?)", (key, text))
         self.connection.commit()
 
-    def get_story(self, session_key: str, before_id: int) -> tuple[int, dict[str, Any]] | None:
-        rows = self.connection.execute(
-            "SELECT through_id, context FROM story_contexts "
-            "WHERE session_key = ? AND through_id < ? ORDER BY through_id DESC",
-            (session_key, before_id),
-        )
-        for through_id, raw in rows:
-            try:
-                context = json.loads(raw) if len(raw) <= 20000 else None
-            except ValueError:
-                continue
-            if isinstance(context, dict):
-                return through_id, context
-        return None
-
-    def save_batch(self, entries: dict[str, str], session_key: str, through_id: int,
-                   story: dict[str, Any] | None) -> None:
-        # A crash must not leave translations committed without their new memory.
+    def save_batch(self, entries: dict[str, str]) -> None:
         with self.connection:
             self.connection.executemany(
                 "INSERT OR REPLACE INTO translations VALUES (?, ?)", entries.items(),
             )
-            if story is not None:
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO story_contexts VALUES (?, ?, ?)",
-                    (session_key, through_id, json.dumps(story, ensure_ascii=False, sort_keys=True)),
-                )
+
+    def clear(self) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM translations")
+            if self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'story_contexts'"
+            ).fetchone():
+                self.connection.execute("DELETE FROM story_contexts")
+        self.connection.execute("VACUUM")
 
     def close(self) -> None:
         self.connection.close()
+
+
+def metadata_cache_directory(override: str | None) -> Path:
+    return Path(override).expanduser() if override is not None else Path.home() / ".cache" / "llmsrt"
+
+
+def temporary_translation_cache_directory(*, create: bool = False) -> Path:
+    uid = os.getuid()
+    path = Path(tempfile.gettempdir()) / f"llmsrt-{uid}"
+    if create:
+        path.mkdir(mode=0o700, exist_ok=True)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return path
+    # The system temporary directory may be shared with other users.
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
+        raise OSError(f"Temporary translation cache directory is not private: {path}")
+    return path
+
+
+def clear_cache(override: str | None) -> None:
+    metadata_dir = metadata_cache_directory(override)
+    translation_dir = metadata_dir if override is not None else temporary_translation_cache_directory()
+    unavailable = []
+    # The metadata directory may also contain the legacy translation database.
+    for directory in dict.fromkeys((translation_dir, metadata_dir)):
+        cache_path = directory / "translations.sqlite3"
+        if not cache_path.is_file():
+            continue
+        if sqlite3 is None:
+            unavailable.append(str(cache_path))
+            continue
+        with closing(TranslationCache(cache_path)) as cache:
+            cache.clear()
+    for path in (metadata_dir / "media").glob("*.json"):
+        if re.fullmatch(r"[0-9a-f]{64}\.json", path.name) and path.is_file():
+            path.unlink(missing_ok=True)
+    if unavailable:
+        raise LlmsrtError(f"Media cache cleared. SQLite is required to clear existing translation caches: {', '.join(unavailable)}")
+    LOG.info("Cleared llmsrt translation and media caches")
 
 
 class InvalidLLMResponse(LlmsrtError):
@@ -1330,7 +1359,7 @@ class ModelQuips:
 
 
 class LLMTranslator:
-    def __init__(self, args: argparse.Namespace, cache: TranslationCache,
+    def __init__(self, args: argparse.Namespace, cache: TranslationCache | None,
                  *, limiter: RequestLimiter | None = None, control: RunControl | None = None):
         self.args = args
         self.cache = cache
@@ -1488,21 +1517,11 @@ class LLMTranslator:
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise InvalidLLMResponse(f"Invalid subtitle JSON structure from the model: {exc}") from exc
 
-    def restore_story(self, before_id: int) -> None:
-        checkpoint = self.cache.get_story(self.session_key, before_id)
-        while checkpoint is not None and checkpoint[0] > self.story_through:
-            story = merge_story_update(empty_story(), checkpoint[1], self.targets)
-            if story is not None:
-                self.story_through, self.story = checkpoint[0], story
-                return
-            checkpoint = self.cache.get_story(self.session_key, checkpoint[0])
-
     def translate_batch(
         self, cues: list[Any], source: str, requested: list[dict[str, Any]],
         output: list[dict[str, str]], *, full_context: bool = False,
     ) -> None:
         first, last = requested[0]["id"] - 1, requested[-1]["id"] - 1
-        self.restore_story(first + 1)
         count = self.args.context_cues
         ids = {item["id"] for item in requested}
         context = [
@@ -1545,15 +1564,17 @@ class LLMTranslator:
                 return
         if translated is None:
             raise LlmsrtError("Model returned no usable translations")
-        # Cache only a fully validated batch, atomically with its memory checkpoint.
+        # Persist validated translations and keep their story update in memory.
         entries = {}
         for index, translations in translated.items():
             for target, text in translations.items():
                 if base_language(target) == "zh":
                     text = self.chinese(text, target)
                 output[index - 1][target] = text
-                entries[self.cache_key(cues, index - 1, source, target)] = text
-        self.cache.save_batch(entries, self.session_key, last + 1, story)
+                if self.cache is not None:
+                    entries[self.cache_key(cues, index - 1, source, target)] = text
+        if self.cache is not None:
+            self.cache.save_batch(entries)
         self.completed_ids.update(translated)
         if story is not None:
             self.story, self.story_through = story, last + 1
@@ -1577,14 +1598,17 @@ class LLMTranslator:
         self.story = empty_story()
         self.story_through = 0
         self.targets = targets
-        # Isolate complete works and target sets; never key translations on a
-        # mutable summary, which would make subsequent cache lookups miss.
-        session = [self.signature, media_context, source, targets, self.args.context_cues,
-                   [cue.content for cue in cues]]
-        self.session_key = hashlib.sha256(json.dumps(
-            session, ensure_ascii=False, sort_keys=True,
-        ).encode("utf-8")).hexdigest()
-        progress.set_stage("reading translation cache", total=len(cues))
+        if self.cache is not None:
+            # Isolate complete works and target sets; never key translations on a
+            # mutable summary, which would make subsequent cache lookups miss.
+            session = [self.signature, media_context, source, targets, self.args.context_cues,
+                       [cue.content for cue in cues]]
+            self.session_key = hashlib.sha256(json.dumps(
+                session, ensure_ascii=False, sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            progress.set_stage("reading translation cache", total=len(cues))
+        else:
+            progress.set_stage("preparing subtitles", total=len(cues))
         output: list[dict[str, str]] = [{} for _ in cues]
         pending: list[dict[str, Any]] = []
         for index, cue in enumerate(cues):
@@ -1593,7 +1617,9 @@ class LLMTranslator:
                 if base_language(source) == base_language(target):
                     output[index][target] = self.chinese(cue.content, target) if base_language(target) == "zh" else cue.content
                     continue
-                cached = self.cache.get(self.cache_key(cues, index, source, target))
+                cached = None
+                if self.cache is not None:
+                    cached = self.cache.get(self.cache_key(cues, index, source, target))
                 if cached is not None:
                     output[index][target] = cached
                 else:
@@ -1604,10 +1630,11 @@ class LLMTranslator:
                 pending.append({"id": index + 1, "text": cue.content, "targets": missing})
             progress.update(completed=index + 1)
         self.cached_count = len(self.completed_ids)
-        self.restore_story(pending[0]["id"] if pending else len(cues) + 1)
         progress.set_stage("translating subtitles", total=len(cues), completed=self.cached_count,
                            detail=f"cached/original {self.cached_count}, pending model translation {len(pending)}")
         if pending and self.args.offline:
+            if self.cache is None:
+                raise LlmsrtError("Offline mode requires cached translations, but the translation cache is unavailable")
             raise LlmsrtError(f"Offline mode lacks a cached translation for subtitle #{pending[0]['id']}; LLM translation requires network access")
         if pending and self.args.full_translation:
             progress.update(detail=f"requesting all {len(pending)} pending subtitles in one batch", emit=True)
@@ -1810,7 +1837,9 @@ def argument_parser() -> argparse.ArgumentParser:
     output.add_argument("-o", "--output", help="SRT output file for a single video")
     output.add_argument("--output-dir", help="output directory; batch processing preserves the input layout")
     parser.add_argument("--overwrite", action="store_true", help="replace existing output files")
-    parser.add_argument("--list-streams", action="store_true", help="only list audio and subtitle streams")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--list-streams", action="store_true", help="only list audio and subtitle streams")
+    actions.add_argument("--clear-cache", action="store_true", help="clear cached translations and media metadata, then exit")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--subtitle", help="source sidecar subtitle file; single video only")
     source.add_argument("--subtitle-stream", type=int, help="absolute subtitle stream index from ffprobe")
@@ -1823,7 +1852,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compute-type", help="speech recognition compute type; int8 on CPU/auto, float16 on CUDA by default")
     parser.add_argument("--cpu-threads", type=int, default=4, help="speech recognition CPU threads")
     parser.add_argument("--offline", action="store_true", help="use only metadata/translation caches and already-downloaded models; no network requests, API calls or model downloads")
-    parser.add_argument("--cache-dir", default=str(Path.home() / ".cache" / "llmsrt"), help="persistent translation cache directory")
+    parser.add_argument("--cache-dir", help="override the cache directory for translations and media metadata; translations use the system temporary directory by default")
     parser.add_argument("--verbose", action="store_true", help="show debug logs, per-request token usage and full stack traces on errors")
     return parser
 
@@ -1981,15 +2010,27 @@ def process_videos(videos: list[Path], root: Path, args: argparse.Namespace,
                    console: Any) -> tuple[int, int, int]:
     control = RunControl()
     limiter = RequestLimiter(args.request_interval, control)
-    cache_path = Path(args.cache_dir).expanduser() / "translations.sqlite3"
-    # Initialize the schema before workers open independent SQLite connections.
-    cache = TranslationCache(cache_path)
-    cache.close()
+    metadata_dir = metadata_cache_directory(args.cache_dir)
+    cache_path = None
+    if sqlite3 is not None:
+        try:
+            translation_dir = (metadata_dir if args.cache_dir is not None
+                               else temporary_translation_cache_directory(create=True))
+            cache_path = translation_dir / "translations.sqlite3"
+            # Initialize the schema before workers open independent SQLite connections.
+            TranslationCache(cache_path).close()
+        except (OSError, *SQLITE_ERRORS) as exc:
+            if args.cache_dir is not None:
+                raise
+            cache_path = None
+            LOG.info("Temporary translation cache unavailable. Continuing without it: %s", exc)
+    else:
+        LOG.info("SQLite unavailable. Continuing without a translation cache")
     # umask is process-wide: sample it before starting any worker threads.
     args._output_mode = 0o666 & ~current_umask()
     recognizer = SpeechRecognizer(args)
     metadata = MetadataResolver(
-        Path(args.cache_dir).expanduser(), timeout=args.metadata_timeout,
+        metadata_dir, timeout=args.metadata_timeout,
         cache_days=args.metadata_cache_days, offline=args.offline, refresh=args.metadata_refresh,
     )
     quip_generator = None
@@ -2009,7 +2050,8 @@ def process_videos(videos: list[Path], root: Path, args: argparse.Namespace,
                                   dashboard=dashboard, slot=slot, control=control) as progress:
                 # Never share SQLite connections or mutable story/translation
                 # state between videos, even when a worker slot is reused.
-                cache = TranslationCache(cache_path)
+                if cache_path is not None:
+                    cache = TranslationCache(cache_path)
                 translator = LLMTranslator(args, cache, limiter=limiter, control=control)
                 destination = output_path(video, root, args)
                 return "completed" if process_video(
@@ -2068,6 +2110,9 @@ def main() -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s: %(message)s", stream=sys.stdout)
     try:
+        if args.clear_cache:
+            clear_cache(args.cache_dir)
+            return 0
         console = dependency("rich.console").Console(file=sys.stdout, highlight=False)
         if console.is_terminal and not console.is_dumb_terminal:
             logging.basicConfig(
@@ -2112,7 +2157,7 @@ def main() -> int:
         completed, skipped, failed = process_videos(videos, root, args, console)
         LOG.info("Completed %s, skipped %s, failed %s", completed, skipped, failed)
         return 1 if failed else 0
-    except (LlmsrtError, OSError, sqlite3.Error) as exc:
+    except (LlmsrtError, OSError, *SQLITE_ERRORS) as exc:
         LOG.error("%s", exc, exc_info=args.verbose)
         return 1
     except KeyboardInterrupt:

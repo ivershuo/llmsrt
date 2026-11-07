@@ -142,9 +142,10 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 - Batches: at most 200 entries (`--batch-size`), a soft cap of 24,000 source characters multiplied by missing target languages (`--batch-chars`), and 20 context entries each side (`--context-cues`).
 - `--full-translation` requests all missing translations at once with the complete source as context, ignoring batch limits and reusing cached results. Default: off; config: `"full_translation": true`. Choose `--max-tokens` and `--timeout` to fit your model; use normal batching if the complete source exceeds its context limit.
 - Results are validated (IDs, languages, non-empty text); truncated output splits into smaller batches, invalid results retry per `--retries`; a still-failing entry errors out rather than producing a misaligned subtitle.
-- Batches carry a rolling story summary (up to 600 characters) and a character/term glossary, updated in the same translation response and saved for resume. Dialogue and user notes take precedence. This internal memory stays out of subtitles and quip-model requests.
+- Batches carry a rolling story summary (up to 600 characters) and a character/term glossary. Both update in memory for the current video and start fresh on resume. Dialogue and user notes take precedence. This context stays out of subtitles and quip-model requests.
 - `--no-json-mode` for models without `response_format`. Model-specific parameters go through `--extra-body`, e.g. `--extra-body '{"thinking":{"type":"disabled"}}'`, depending on the model. `--max-tokens` defaults to 32,768, including thinking tokens; raise it within the model's limit or reduce batch size if output is truncated.
-- Translations are cached in `~/.cache/llmsrt/translations.sqlite3` (`--cache-dir`) and reused after interruptions. Earlier-format caches are not reused. `--offline` uses existing caches and downloaded ASR models only; missing translations are an error.
+- Translations are cached in a per-user directory under the system temporary directory for resuming interrupted runs. Use `--cache-dir` to choose another location. `--offline` needs cached translations when model output is required.
+- `llmsrt --clear-cache` clears translation and media metadata caches, including the previous default database, and compacts the databases. Add `--cache-dir` to clear only the specified directory.
 - Rate limits and server errors back off and retry (`--retries`, `--request-interval`, shared across concurrent translations); auth and parameter errors fail immediately. Request timeout defaults to 600 seconds (`--timeout`).
 
 ### Progress
@@ -193,7 +194,7 @@ python3 -m pip install --user --upgrade llmsrt   # or: pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-Append `@v0.1.5` to the git URL to pin a release tag.
+Append `@v0.2.0` to the git URL to pin a release tag.
 
 **How accurate is the translation?** — speech recognition can miss or mishear dialogue, and LLMs can mistranslate names, slang or context. The tool validates subtitle structure and entry correspondence, but cannot guarantee the translations are fully accurate.
 
