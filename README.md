@@ -33,6 +33,7 @@ The output appears next to the video: `Interstellar.mkv.zh-cn.en.srt`. Run `llms
 llmsrt                                  # every video in the current directory
 llmsrt movie.mkv                        # one video; quote paths with spaces
 llmsrt /data/videos --recursive         # include subdirectories
+llmsrt /data/videos --concurrency 3     # translate up to 3 videos at once (default: 5)
 llmsrt movie.mkv --targets en,zh-cn     # English on top, Chinese below
 llmsrt movie.mkv --source ja            # use the Japanese subtitle/audio
 llmsrt movie.mkv --list-streams         # show streams; no API key needed
@@ -44,6 +45,7 @@ llmsrt movie.mkv --full-translation     # try all subtitles in one request
 ```
 
 - Without `--source`, embedded English subtitles are preferred; if unavailable, the first extractable embedded text track is tried, then sidecar files next to the video.
+- Directories process up to 5 videos concurrently (`--concurrency`, config: `"concurrency": 5`); use `1` for sequential processing. Each video has its own progress and translation context. ASR shares one model and runs sequentially.
 - Output is UTF-8, keeps the source timing, removes styling tags, and lays out one line per target language in the order given by `--targets`. The default bilingual output looks like:
 
 ```srt
@@ -93,7 +95,7 @@ Translation and quips declare no tools and omit `tools` and `tool_choice` for AP
 }
 ```
 
-Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `full_translation`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `stream`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `quips`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
+Precedence: **command line > config file > `LLMSRT_*` environment variables > presets**. Use `--config path` or `LLMSRT_CONFIG` to point elsewhere; only one file is loaded, never merged. Accepted keys: `concurrency`, `provider`, `model`, `base_url`, `api_key_env`, `batch_size`, `batch_chars`, `full_translation`, `context_cues`, `temperature`, `max_tokens`, `timeout`, `retries`, `request_interval`, `json_mode`, `stream`, `extra_body`, `title`, `media_type`, `year`, `season`, `episode`, `media_context`, `media_context_file`, `characters`, `progress`, `progress_interval`, `quips`, `model_quips`, `metadata`, `metadata_sources`, `imdb`, `douban`, `metadata_timeout`, `metadata_cache_days`, `metadata_refresh`.
 
 **Use `llmsrt -h` for detailed usage help.**
 
@@ -143,11 +145,11 @@ Defaults: Whisper `base` model, CPU `int8`, 4 threads; the model downloads on fi
 - Batches carry a rolling story summary (up to 600 characters) and a character/term glossary, updated in the same translation response and saved for resume. Dialogue and user notes take precedence. This internal memory stays out of subtitles and quip-model requests.
 - `--no-json-mode` for models without `response_format`. Model-specific parameters go through `--extra-body`, e.g. `--extra-body '{"thinking":{"type":"disabled"}}'`, depending on the model. `--max-tokens` defaults to 32,768, including thinking tokens; raise it within the model's limit or reduce batch size if output is truncated.
 - Translations are cached in `~/.cache/llmsrt/translations.sqlite3` (`--cache-dir`) and reused after interruptions. Earlier-format caches are not reused. `--offline` uses existing caches and downloaded ASR models only; missing translations are an error.
-- Rate limits and server errors back off and retry (`--retries`, `--request-interval`); auth and parameter errors fail immediately. Request timeout defaults to 600 seconds (`--timeout`).
+- Rate limits and server errors back off and retry (`--retries`, `--request-interval`, shared across concurrent translations); auth and parameter errors fail immediately. Request timeout defaults to 600 seconds (`--timeout`).
 
 ### Progress
 
-Interactive terminals show a spinner and one progress bar with stage, subtitle count, elapsed time, ETA and token usage. Translation streams by default, advancing overall progress as entries arrive; results are cached only after batch validation, and retries reset provisional progress. Use `--no-stream` or `"stream": false` for incompatible APIs. Optional metadata misses stay quiet; `--verbose` shows full diagnostics. Use `--no-progress` to hide progress.
+Interactive terminals show a spinner and one progress bar per active video, with stage, subtitle count, elapsed time, ETA and token usage. Translation streams by default, advancing overall progress as entries arrive; results are cached only after batch validation, and retries reset provisional progress. Use `--no-stream` or `"stream": false` for incompatible APIs. Optional metadata misses stay quiet; `--verbose` shows full diagnostics. Use `--no-progress` to hide progress.
 
 Waiting quips are off by default. `--quips` enables them using the current model in the background, with local lines as fallback; add `--no-model-quips` to use local lines only. Quips draw on the current batch's atmosphere without quoting plot details; the story summary is not shared.
 
@@ -191,7 +193,7 @@ python3 -m pip install --user --upgrade llmsrt   # or: pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-Append `@v0.1.4` to the git URL to pin a release tag.
+Append `@v0.1.5` to the git URL to pin a release tag.
 
 **How accurate is the translation?** — speech recognition can miss or mishear dialogue, and LLMs can mistranslate names, slang or context. The tool validates subtitle structure and entry correspondence, but cannot guarantee the translations are fully accurate.
 

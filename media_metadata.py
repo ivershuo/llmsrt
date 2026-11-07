@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 import re
 import tempfile
+import threading
 import time
 import unicodedata
 from typing import Any
@@ -289,6 +290,7 @@ class MetadataResolver:
         self.failures: set[str] = set()
         self.opener = request.build_opener(RestrictedRedirect())
         self.last_request = 0.0
+        self.lock = threading.Lock()
 
     def key(self, value: str) -> str:
         return hashlib.sha256(("metadata-v1:" + value).encode("utf-8")).hexdigest()
@@ -342,7 +344,7 @@ class MetadataResolver:
         progress.update(detail=f"fetching metadata: {url}", emit=True)
         self.last_request = time.monotonic()
         req = request.Request(url, headers={
-            "User-Agent": "llmsrt/0.1.3 (subtitle background metadata)",
+            "User-Agent": "llmsrt/0.1.5 (subtitle background metadata)",
             "Accept": "text/html,application/json", "Accept-Language": "zh-CN,en;q=0.8",
         })
         try:
@@ -444,6 +446,18 @@ class MetadataResolver:
     def enrich(self, context: dict[str, Any], args: Any, progress: Any) -> dict[str, Any]:
         if not args.metadata:
             return context
+        progress.set_stage("waiting for show background")
+        # Share the successful and failed lookups across concurrent episodes;
+        # serialize catalog requests to preserve the site's request interval.
+        while not self.lock.acquire(timeout=0.2):
+            progress.check_cancelled()
+        try:
+            progress.check_cancelled()
+            return self._enrich(context, args, progress)
+        finally:
+            self.lock.release()
+
+    def _enrich(self, context: dict[str, Any], args: Any, progress: Any) -> dict[str, Any]:
         progress.set_stage("fetching show background", detail="searching IMDb/Douban for synopsis, genres and credits")
         hints = filename_hints(context["video_filename"])
         title = args.title or hints["title"]

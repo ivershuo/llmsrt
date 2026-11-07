@@ -3,6 +3,7 @@
   "model": "gpt-6-luna",
   "base_url": "https://api.openai.com/v1",
   "api_key_env": "OPENAI_API_KEY",
+  "concurrency": 5,
   "title": null,
   "media_type": "auto",
   "media_context": "",

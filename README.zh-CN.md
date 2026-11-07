@@ -35,6 +35,7 @@ llmsrt /data/movies/Interstellar.mkv
 llmsrt                                  # 给当前目录下的所有视频生成字幕文件
 llmsrt movie.mkv                        # 给单个视频生成字幕文件；路径含空格时需加引号
 llmsrt /data/videos --recursive         # 给指定目录及其子目录中的视频生成字幕文件
+llmsrt /data/videos --concurrency 3     # 同时处理 3 个视频，默认 5 个
 llmsrt movie.mkv --targets en,zh-cn     # 调整字幕顺序：英文在上，简体中文在下
 llmsrt movie.mkv --source ja            # 指定字幕源语言为日语
 llmsrt movie.mkv --list-streams         # 查看视频中的轨道信息，无需 API 密钥
@@ -46,6 +47,7 @@ llmsrt movie.mkv --full-translation     # 尝试一次翻译全部字幕
 ```
 
 - 未指定 `--source` 时，优先使用内嵌英文字幕；若不可用，则尝试第一条可提取的内嵌文本字幕，再查找视频所在目录中的外挂字幕。
+- 目录默认并发处理 5 个视频，可用 `--concurrency` 或配置 `"concurrency": 5` 调整；设为 `1` 则串行处理。每个视频独立显示进度、保留翻译上下文；语音识别复用一个模型并排队执行。
 - 输出采用 UTF-8 编码，保留原字幕的时间轴，移除样式标签，并按 `--targets` 指定的语言顺序排列文本。例如，默认的中英双语字幕如下：
 
 ```srt
@@ -97,7 +99,7 @@ llmsrt movie.mkv --provider custom --base-url https://your-gateway.example/v1 \
 
 配置优先级为：**命令行参数 > 配置文件 > `LLMSRT_*` 环境变量 > 内置预设**。通过 `--config path` 或 `LLMSRT_CONFIG` 可指定其他配置文件。每次只加载一个配置文件，不会合并多个文件的内容。
 
-支持的配置项：`provider`、`model`、`base_url`、`api_key_env`、`batch_size`、`batch_chars`、`full_translation`、`context_cues`、`temperature`、`max_tokens`、`timeout`、`retries`、`request_interval`、`json_mode`、`extra_body`、`title`、`media_type`、`year`、`season`、`episode`、`media_context`、`media_context_file`、`characters`、`progress`、`progress_interval`、`model_quips`、`metadata`、`metadata_sources`、`imdb`、`douban`、`metadata_timeout`、`metadata_cache_days`、`metadata_refresh`。
+支持的配置项：`concurrency`、`provider`、`model`、`base_url`、`api_key_env`、`batch_size`、`batch_chars`、`full_translation`、`context_cues`、`temperature`、`max_tokens`、`timeout`、`retries`、`request_interval`、`json_mode`、`stream`、`extra_body`、`title`、`media_type`、`year`、`season`、`episode`、`media_context`、`media_context_file`、`characters`、`progress`、`progress_interval`、`quips`、`model_quips`、`metadata`、`metadata_sources`、`imdb`、`douban`、`metadata_timeout`、`metadata_cache_days`、`metadata_refresh`。
 
 **使用`llmsrt -h`查看具体使用帮助。**
 
@@ -151,11 +153,13 @@ llmsrt movie.mkv --asr --asr-model small --device cuda
 - 每批附带前情摘要（最多 600 字）和人物、术语表，由同一次翻译响应更新并保存，支持断点恢复。原文和用户说明优先；内部摘要不会写入字幕，也不传给俏皮话模型。
 - 不支持 `response_format` 的模型可用 `--no-json-mode`。模型专用参数通过 `--extra-body` 传入，例如 `--extra-body '{"thinking":{"type":"disabled"}}'`，以模型支持情况为准。`--max-tokens` 默认为 32,768，包含思考 token；输出截断时可在模型允许的范围内调高，或减少每批条数。
 - 译文缓存在 `~/.cache/llmsrt/translations.sqlite3`（`--cache-dir`），中断后可复用；旧格式缓存不复用。`--offline` 仅使用已有缓存和已下载的语音识别模型，缺少译文缓存时会报错。
-- 限流或服务器错误会退避重试（`--retries`、`--request-interval`）；鉴权或参数错误直接报错。请求超时默认为 600 秒（`--timeout`）。
+- 限流或服务器错误会退避重试（`--retries`、`--request-interval`），并发翻译共享请求间隔；鉴权或参数错误直接报错。请求超时默认为 600 秒（`--timeout`）。
 
 ### 进度显示
 
-交互式终端显示 spinner 和进度条，包含当前阶段、字幕数量、耗时、预计剩余时间及 token 用量。提示信息使用不带自动高亮的紧凑单行，`--verbose` 查看完整诊断。等待时默认由当前模型在后台生成俏皮话，失败时使用本地文案；`--no-model-quips` 或 `"model_quips": false` 可关闭这部分额外调用。文案只借用当前批次的氛围，不复述剧情，也不接收前情摘要。`--no-progress` 关闭进度。
+交互式终端为每个正在处理的视频显示 spinner 和一条进度条，包含当前阶段、字幕数量、耗时、预计剩余时间及 token 用量。默认流式接收，字幕条目到达后推进进度，整批校验成功后写入缓存；重试时回退未确认的进度。不支持流式的接口可用 `--no-stream` 或 `"stream": false`。可恢复的作品资料查询失败默认不显示，`--verbose` 查看完整诊断；`--no-progress` 关闭进度。
+
+等待俏皮话默认关闭，`--quips` 开启后由当前模型在后台生成，失败时使用本地文案；添加 `--no-model-quips` 仅使用本地文案。文案只借用当前批次的氛围，不复述剧情，也不接收前情摘要。
 
 重定向或管道输出时，改为每 5 秒输出普通文本状态（`--progress-interval`），可用 `| tee run.log` 保存日志。管道、离线模式和 `--no-progress` 均不调用俏皮话模型。
 
@@ -209,7 +213,7 @@ python3 -m pip install --user --upgrade llmsrt   # 或：pipx upgrade llmsrt
 python3 -m pip install --user "llmsrt @ git+https://github.com/ivershuo/llmsrt.git"
 ```
 
-如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.3`。
+如需安装指定版本，可在 Git 地址末尾添加版本标签，例如 `@v0.1.5`。
 
 **翻译准确性如何？**
 

@@ -7,6 +7,7 @@ Designed for Linux and macOS, Python 3.10+. See README.md for installation and e
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -22,6 +23,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -50,7 +52,7 @@ TOOL_PARAMETERS = {"tools", "tool_choice", "functions", "function_call", "parall
 CONFIG_KEYS = {
     "provider", "model", "base_url", "api_key_env", "batch_size", "batch_chars", "full_translation",
     "context_cues", "temperature", "max_tokens", "timeout", "retries",
-    "request_interval", "json_mode", "stream", "extra_body",
+    "request_interval", "json_mode", "stream", "extra_body", "concurrency",
     "title", "media_type", "year", "season", "episode", "media_context",
     "media_context_file", "characters", "progress", "progress_interval", "quips", "model_quips",
     "metadata", "metadata_sources", "imdb", "douban", "metadata_timeout",
@@ -247,12 +249,82 @@ class TerminalLogHandler(logging.Handler):
             self.handleError(record)
 
 
+class RunControl:
+    """Cancel queued work, interrupt active model reads and wake retry waits."""
+
+    def __init__(self):
+        self.cancelled = threading.Event()
+        self.lock = threading.Lock()
+        self.responses: set[Any] = set()
+
+    def check(self) -> None:
+        if self.cancelled.is_set():
+            raise CancelledError()
+
+    def pause(self, seconds: float) -> None:
+        self.cancelled.wait(seconds)
+        self.check()
+
+    @contextmanager
+    def reading(self, response: Any):
+        with self.lock:
+            self.check()
+            self.responses.add(response)
+        try:
+            yield
+        except Exception:
+            self.check()
+            raise
+        finally:
+            with self.lock:
+                self.responses.discard(response)
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        with self.lock:
+            responses = list(self.responses)
+        for response in responses:
+            # urllib exposes no public read cancellation. Shutting down the
+            # underlying socket wakes a blocked read before closing its buffer.
+            connection = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+            try:
+                if connection is not None:
+                    connection.shutdown(socket.SHUT_RDWR)
+                response.close()
+            except OSError:
+                pass
+
+
+class RequestLimiter:
+    """Keep the configured translation request interval across all videos."""
+
+    def __init__(self, interval: float, control: RunControl):
+        self.interval = interval
+        self.control = control
+        self.lock = threading.Lock()
+        self.last_request = float("-inf")
+
+    def acquire(self, progress: ProgressReporter | None) -> None:
+        while True:
+            self.control.check()
+            with self.lock:
+                delay = self.interval - (time.monotonic() - self.last_request)
+                if delay <= 0:
+                    self.last_request = time.monotonic()
+                    return
+            if progress:
+                progress.update(detail=f"waiting {delay:.1f}s for the request interval", emit=True)
+            self.control.pause(delay)
+
+
 class ProgressReporter:
     """Refresh terminal progress in place, with plain heartbeat logs for pipes."""
 
     def __init__(self, filename: str, file_index: int, file_total: int,
                  *, interval: float, enabled: bool, console: Any = None,
-                 quips: bool = False, quip_generator: Any = None):
+                 quips: bool = False, quip_generator: Any = None,
+                 dashboard: ProgressDashboard | None = None, slot: int = 0,
+                 control: RunControl | None = None):
         self.label = f"[file {file_index}/{file_total}] {filename}"
         self.interval = interval
         self.enabled = enabled
@@ -279,19 +351,27 @@ class ProgressReporter:
         self.wait_cancel: threading.Event | None = None
         self.response_total = self.response_received = 0
         self.response_chars = self.reasoning_chars = 0
+        self.dashboard = dashboard
+        self.slot = slot
+        self.control = control
 
     def __enter__(self) -> ProgressReporter:
         if self.enabled:
             if self.console is None:
                 self.console = dependency("rich.console").Console(file=sys.stdout, highlight=False)
             if self.console.is_terminal and not self.console.is_dumb_terminal:
-                from rich.live import Live
                 from rich.spinner import Spinner
 
                 self.spinner = Spinner("dots", style="cyan")
-                self.live = Live(console=self.console, get_renderable=self.render,
-                                 refresh_per_second=4, transient=True)
-                self.live.start(refresh=True)
+                if self.dashboard is not None:
+                    self.live = self.dashboard.live
+                    self.dashboard.attach(self.slot, self)
+                else:
+                    from rich.live import Live
+
+                    self.live = Live(console=self.console, get_renderable=self.render,
+                                     refresh_per_second=4, transient=True)
+                    self.live.start(refresh=True)
             else:
                 self.emit()
                 self.thread = threading.Thread(target=self.heartbeat, daemon=True)
@@ -299,7 +379,7 @@ class ProgressReporter:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        status = "done" if exc_type is None else "interrupted" if exc_type is KeyboardInterrupt else "failed"
+        status = "done" if exc_type is None else "interrupted" if exc_type in (KeyboardInterrupt, CancelledError) else "failed"
         self.finish(status)
         if self.thread is not None:
             self.thread.join(timeout=1)
@@ -317,7 +397,7 @@ class ProgressReporter:
             return "00:00:00"
         return format_duration(elapsed * remaining / processed) if remaining is not None and processed > 0 else "estimating"
 
-    def render(self) -> Any:
+    def render(self, *, compact: bool = False, show_timing: bool = True) -> Any:
         from rich.console import Group
         from rich.progress_bar import ProgressBar
         from rich.table import Table
@@ -329,7 +409,11 @@ class ProgressReporter:
             stage = Table.grid(padding=(0, 1))
             stage.add_column(width=2)
             stage.add_column(no_wrap=True, overflow="ellipsis")
-            stage.add_row(self.spinner, Text(self.stage, style="cyan", no_wrap=True, overflow="ellipsis"))
+            stage_text = Text(self.stage, style="cyan", no_wrap=True, overflow="ellipsis")
+            if compact and self.detail:
+                stage_text.append(f" · {self.detail}", style="dim")
+            stage.add_row(Text("✓" if self.stage == "done" else "·", style="dim") if self.finished else self.spinner,
+                          stage_text)
             rows = [header, stage]
             if self.total is not None:
                 completed = self.visible_completed
@@ -345,7 +429,8 @@ class ProgressReporter:
                 rows.append(bar)
             else:
                 rows.append(Text(""))
-            rows.append(Text(self.detail, style="dim", overflow="ellipsis", no_wrap=True))
+            if not compact:
+                rows.append(Text(self.detail, style="dim", overflow="ellipsis", no_wrap=True))
             quip = self.waiting_quip(time.monotonic())
             if self.quips_enabled:
                 rows.append(Text(quip or "", style="dim italic", overflow="ellipsis", no_wrap=True))
@@ -354,15 +439,22 @@ class ProgressReporter:
                 timing += f"  ·  ETA {self.eta(elapsed)}"
             if self.input_tokens or self.output_tokens:
                 timing += f"  ·  Tokens {self.input_tokens:,} in / {self.output_tokens:,} out"
-            rows.append(Text(timing, style="dim", overflow="ellipsis", no_wrap=True))
+            if show_timing:
+                rows.append(Text(timing, style="dim", overflow="ellipsis", no_wrap=True))
             return Group(*rows)
 
+    def check_cancelled(self) -> None:
+        if self.control is not None:
+            self.control.check()
+
     def begin_response(self, total: int) -> None:
+        self.check_cancelled()
         with self.lock:
             self.response_total = total
             self.response_received = self.response_chars = self.reasoning_chars = 0
 
     def receive_response(self, received: int, content_chars: int, reasoning_chars: int) -> None:
+        self.check_cancelled()
         with self.lock:
             self.response_received = min(received, self.response_total)
             self.response_chars, self.reasoning_chars = content_chars, reasoning_chars
@@ -440,6 +532,7 @@ class ProgressReporter:
 
     def set_stage(self, stage: str, *, total: float | None = None,
                   completed: float = 0, unit: str = "entries", detail: str = "") -> None:
+        self.check_cancelled()
         with self.lock:
             self.stage = stage
             self.stage_started = time.monotonic()
@@ -453,6 +546,7 @@ class ProgressReporter:
 
     def update(self, *, completed: float | None = None, detail: str | None = None,
                emit: bool = False) -> None:
+        self.check_cancelled()
         with self.lock:
             if completed is not None:
                 # Promote the validated batch and remove its provisional count
@@ -490,11 +584,12 @@ class ProgressReporter:
             if self.finished:
                 return
             self.finished = True
+            self.stage = status
             self.stop.set()
             if self.wait_cancel is not None:
                 self.wait_cancel.set()
         # Live's refresh thread also takes self.lock; stop it outside the lock.
-        if self.live is not None:
+        if self.live is not None and self.dashboard is None:
             self.live.stop()
         if self.enabled:
             elapsed = format_duration(time.monotonic() - self.started)
@@ -510,6 +605,60 @@ class ProgressReporter:
                 self.console.print(result)
             else:
                 LOG.info("%s | %s | file elapsed %s%s", self.label, status, elapsed, tokens)
+
+
+class ProgressDashboard:
+    """Render worker slots in one Live display and remove them as the queue drains."""
+
+    def __init__(self, console: Any, slots: int, *, enabled: bool, quips: bool):
+        self.console = console
+        self.slots: dict[int, ProgressReporter | None] = dict.fromkeys(range(slots))
+        self.compact = slots > 1
+        self.lock = threading.Lock()
+        self.enabled = enabled
+        self.quips = quips
+        self.live: Any = None
+
+    def __enter__(self) -> ProgressDashboard:
+        if self.enabled and self.console.is_terminal and not self.console.is_dumb_terminal:
+            from rich.live import Live
+
+            self.live = Live(console=self.console, get_renderable=self.render,
+                             refresh_per_second=4, transient=True)
+            self.live.start(refresh=True)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if self.live is not None:
+            self.live.stop()
+
+    def attach(self, slot: int, progress: ProgressReporter) -> None:
+        with self.lock:
+            self.slots[slot] = progress
+
+    def retire(self, slot: int) -> None:
+        with self.lock:
+            del self.slots[slot]
+
+    def render(self) -> Any:
+        from rich.console import Group
+        from rich.text import Text
+
+        with self.lock:
+            slots = list(self.slots.items())
+        # Five normal slots use twenty lines. Omit timing on short terminals
+        # before Rich has to crop the last active video's progress bar.
+        height = (4 if self.compact else 5) + int(self.quips)
+        show_timing = len(slots) * height < self.console.size.height
+        rows = []
+        for index, progress in slots:
+            if progress is None:
+                rows.extend([Text(f"[slot {index + 1}] waiting", style="dim", no_wrap=True,
+                                  overflow="ellipsis"),
+                             *[Text("") for _ in range(height - int(not show_timing) - 1)]])
+            else:
+                rows.append(progress.render(compact=self.compact, show_timing=show_timing))
+        return Group(*rows)
 
 
 def dependency(name: str) -> Any:
@@ -753,8 +902,23 @@ class SpeechRecognizer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.model = None
+        self.lock = threading.Lock()
 
     def transcribe(
+        self, video: Path, streams: list[dict[str, Any]], workdir: Path,
+        progress: ProgressReporter,
+    ) -> SubtitleSource:
+        # Reuse one model without concurrent inference or multiplying GPU memory.
+        progress.set_stage("waiting for ASR")
+        while not self.lock.acquire(timeout=0.2):
+            progress.check_cancelled()
+        try:
+            progress.check_cancelled()
+            return self._transcribe(video, streams, workdir, progress)
+        finally:
+            self.lock.release()
+
+    def _transcribe(
         self, video: Path, streams: list[dict[str, Any]], workdir: Path,
         progress: ProgressReporter,
     ) -> SubtitleSource:
@@ -1166,11 +1330,14 @@ class ModelQuips:
 
 
 class LLMTranslator:
-    def __init__(self, args: argparse.Namespace, cache: TranslationCache):
+    def __init__(self, args: argparse.Namespace, cache: TranslationCache,
+                 *, limiter: RequestLimiter | None = None, control: RunControl | None = None):
         self.args = args
         self.cache = cache
         self.converters: dict[str, Any] = {}
         self.last_request = 0.0
+        self.limiter = limiter
+        self.control = control
         self.opener = urlrequest.build_opener(NoRedirect())
         self.media_context: dict[str, Any] = {}
         self.progress: ProgressReporter | None = None
@@ -1205,11 +1372,14 @@ class LLMTranslator:
         args = self.args
         request, api_key = make_llm_request(args, TRANSLATION_PROMPT, payload, stream=args.stream)
         for attempt in range(args.retries + 1):
-            interval = args.request_interval - (time.monotonic() - self.last_request)
-            if interval > 0:
-                if self.progress:
-                    self.progress.update(detail=f"waiting {interval:.1f}s for the request interval", emit=True)
-                time.sleep(interval)
+            if self.limiter is not None:
+                self.limiter.acquire(self.progress)
+            else:
+                interval = args.request_interval - (time.monotonic() - self.last_request)
+                if interval > 0:
+                    if self.progress:
+                        self.progress.update(detail=f"waiting {interval:.1f}s for the request interval", emit=True)
+                    time.sleep(interval)
             self.last_request = time.monotonic()
             delay = min(2 ** (attempt + 1), 60)
             if self.progress:
@@ -1222,7 +1392,11 @@ class LLMTranslator:
                 )
             try:
                 with self.opener.open(request, timeout=args.timeout) as response:
-                    result = read_llm_response(response, payload["items"], self.progress if args.stream else None)
+                    reading = self.control.reading(response) if self.control is not None else nullcontext()
+                    with reading:
+                        result = read_llm_response(response, payload["items"], self.progress if args.stream else None)
+                if self.control is not None:
+                    self.control.check()
                 usage = result.get("usage")
                 if isinstance(usage, dict):
                     LOG.debug("Model %s, tokens this call: input %s, output %s", args.model,
@@ -1244,6 +1418,8 @@ class LLMTranslator:
                     pass
             except (urlerror.URLError, TimeoutError, OSError, HTTPException) as exc:
                 message = f"LLM request failed: {str(exc).replace(api_key, '[REDACTED]')}"
+            if self.control is not None:
+                self.control.check()
             if self.progress:
                 self.progress.clear_response()
             if attempt == args.retries:
@@ -1251,7 +1427,10 @@ class LLMTranslator:
             LOG.warning("%s; retrying in %s s (%s/%s)", message, delay, attempt + 1, args.retries)
             if self.progress:
                 self.progress.update(detail=f"backing off {delay:g} s before retrying", emit=True)
-            time.sleep(delay)
+            if self.control is not None:
+                self.control.pause(delay)
+            else:
+                time.sleep(delay)
         raise LlmsrtError("LLM request failed")
 
     @staticmethod
@@ -1459,7 +1638,7 @@ def current_umask() -> int:
     return mask
 
 
-def write_srt(destination: Path, cues: list[Any], *, overwrite: bool) -> None:
+def write_srt(destination: Path, cues: list[Any], *, overwrite: bool, file_mode: int | None = None) -> None:
     srt = dependency("srt")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -1475,7 +1654,7 @@ def write_srt(destination: Path, cues: list[Any], *, overwrite: bool) -> None:
             os.fsync(file.fileno())
         # NamedTemporaryFile creates 0600; chmod to what a direct write would get
         # under the current umask so NAS shares and media servers can read it.
-        os.chmod(temporary, 0o666 & ~current_umask())
+        os.chmod(temporary, 0o666 & ~current_umask() if file_mode is None else file_mode)
         if overwrite:
             os.replace(temporary, destination)
         else:
@@ -1569,7 +1748,7 @@ def process_video(
             lines = [translated[index - 1][target] for target in args.targets]
             output.append(srt.Subtitle(index=index, start=cue.start, end=cue.end, content="\n".join(lines)))
             progress.update(completed=index)
-        write_srt(destination, output, overwrite=args.overwrite)
+        write_srt(destination, output, overwrite=args.overwrite, file_mode=getattr(args, "_output_mode", None))
         progress.update(completed=len(output), detail="SRT saved", emit=True)
     LOG.info("Output written: %s", destination)
     return True
@@ -1584,6 +1763,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", "--source-language", help="source language; English is preferred when unspecified, otherwise the first extractable subtitle")
     parser.add_argument("--targets", "--target-languages", default="zh-cn,en", help="comma-separated output languages; the order is top to bottom in the subtitle")
     parser.add_argument("--config", help="JSON config file; defaults to LLMSRT_CONFIG or llmsrt/config.json in the user config directory")
+    parser.add_argument("--concurrency", "-j", type=int, default=5,
+                        help="maximum videos processed concurrently; use 1 for sequential processing")
     parser.add_argument("--title", "--media-title", help="movie/TV series title; defaults to the video filename as a hint")
     parser.add_argument("--media-type", choices=("auto", "movie", "tv"), default="auto", help="media type; auto means unspecified")
     parser.add_argument("--year", type=int, help="release year, to tell same-named works apart")
@@ -1703,7 +1884,7 @@ def configure_llm(args: argparse.Namespace) -> None:
     args.base_url = args.base_url.rstrip("/")
     if args.base_url.endswith("/chat/completions"):
         raise LlmsrtError("--base-url must not include /chat/completions; it is appended automatically")
-    for name in ("batch_size", "batch_chars", "max_tokens"):
+    for name in ("batch_size", "batch_chars", "max_tokens", "concurrency"):
         if type(getattr(args, name)) is not int or getattr(args, name) < 1:
             raise LlmsrtError(f"{name} must be a positive integer")
     for name in ("context_cues", "retries"):
@@ -1796,13 +1977,96 @@ def configure_metadata(args: argparse.Namespace) -> None:
         raise LlmsrtError("--metadata-refresh needs network access and cannot be combined with --offline")
 
 
+def process_videos(videos: list[Path], root: Path, args: argparse.Namespace,
+                   console: Any) -> tuple[int, int, int]:
+    control = RunControl()
+    limiter = RequestLimiter(args.request_interval, control)
+    cache_path = Path(args.cache_dir).expanduser() / "translations.sqlite3"
+    # Initialize the schema before workers open independent SQLite connections.
+    cache = TranslationCache(cache_path)
+    cache.close()
+    # umask is process-wide: sample it before starting any worker threads.
+    args._output_mode = 0o666 & ~current_umask()
+    recognizer = SpeechRecognizer(args)
+    metadata = MetadataResolver(
+        Path(args.cache_dir).expanduser(), timeout=args.metadata_timeout,
+        cache_days=args.metadata_cache_days, offline=args.offline, refresh=args.metadata_refresh,
+    )
+    quip_generator = None
+    if args.quips and args.model_quips and args.progress and not args.offline and console.is_terminal and not console.is_dumb_terminal:
+        quip_generator = ModelQuips(args)
+    workers = min(args.concurrency, len(videos))
+    counts = {"completed": 0, "skipped": 0, "failed": 0}
+    dashboard = ProgressDashboard(console, workers, enabled=args.progress, quips=args.quips)
+
+    def process_one(file_index: int, video: Path, slot: int) -> str:
+        cache = None
+        try:
+            control.check()
+            with ProgressReporter(video.name, file_index, len(videos),
+                                  interval=args.progress_interval, enabled=args.progress,
+                                  console=console, quips=args.quips, quip_generator=quip_generator,
+                                  dashboard=dashboard, slot=slot, control=control) as progress:
+                # Never share SQLite connections or mutable story/translation
+                # state between videos, even when a worker slot is reused.
+                cache = TranslationCache(cache_path)
+                translator = LLMTranslator(args, cache, limiter=limiter, control=control)
+                destination = output_path(video, root, args)
+                return "completed" if process_video(
+                    video, destination, args, translator, recognizer, metadata, progress,
+                ) else "skipped"
+        except CancelledError:
+            raise
+        except Exception as exc:
+            LOG.error("Failed to process %s: %s", video, exc, exc_info=args.verbose)
+            return "failed"
+        finally:
+            if cache is not None:
+                cache.close()
+
+    try:
+        with dashboard:
+            executor = None
+            futures = {}
+            try:
+                if workers == 1:
+                    for file_index, video in enumerate(videos, 1):
+                        counts[process_one(file_index, video, 0)] += 1
+                else:
+                    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="llmsrt-video")
+                    remaining = iter(enumerate(videos, 1))
+                    for slot in range(workers):
+                        file_index, video = next(remaining)
+                        futures[executor.submit(process_one, file_index, video, slot)] = slot
+                    while futures:
+                        done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            slot = futures.pop(future)
+                            counts[future.result()] += 1
+                            item = next(remaining, None)
+                            if item is None:
+                                dashboard.retire(slot)
+                            else:
+                                futures[executor.submit(process_one, *item, slot)] = slot
+            except BaseException:
+                control.cancel()
+                for future in futures:
+                    future.cancel()
+                raise
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
+    finally:
+        if quip_generator is not None:
+            quip_generator.close()
+    return counts["completed"], counts["skipped"], counts["failed"]
+
+
 def main() -> int:
     parser = argument_parser()
     args = configured_arguments(parser)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s: %(message)s", stream=sys.stdout)
-    cache = None
-    quip_generator = None
     try:
         console = dependency("rich.console").Console(file=sys.stdout, highlight=False)
         if console.is_terminal and not console.is_dumb_terminal:
@@ -1842,33 +2106,10 @@ def main() -> int:
         configure_llm(args)
         configure_media_and_progress(args)
         configure_metadata(args)
-        if args.quips and args.model_quips and args.progress and not args.offline and console.is_terminal and not console.is_dumb_terminal:
-            quip_generator = ModelQuips(args)
         if args.offline:
             os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        cache = TranslationCache(Path(args.cache_dir).expanduser() / "translations.sqlite3")
-        translator = LLMTranslator(args, cache)
-        recognizer = SpeechRecognizer(args)
-        metadata = MetadataResolver(
-            Path(args.cache_dir).expanduser(), timeout=args.metadata_timeout,
-            cache_days=args.metadata_cache_days, offline=args.offline,
-            refresh=args.metadata_refresh,
-        )
-        completed = skipped = failed = 0
-        for file_index, video in enumerate(videos, 1):
-            try:
-                with ProgressReporter(video.name, file_index, len(videos),
-                                      interval=args.progress_interval, enabled=args.progress,
-                                      console=console, quips=args.quips, quip_generator=quip_generator) as progress:
-                    destination = output_path(video, root, args)
-                    if process_video(video, destination, args, translator, recognizer, metadata, progress):
-                        completed += 1
-                    else:
-                        skipped += 1
-            except Exception as exc:
-                failed += 1
-                LOG.error("Failed to process %s: %s", video, exc, exc_info=args.verbose)
+        completed, skipped, failed = process_videos(videos, root, args, console)
         LOG.info("Completed %s, skipped %s, failed %s", completed, skipped, failed)
         return 1 if failed else 0
     except (LlmsrtError, OSError, sqlite3.Error) as exc:
@@ -1877,11 +2118,6 @@ def main() -> int:
     except KeyboardInterrupt:
         LOG.warning("Interrupted; finished outputs and the translation cache are kept")
         return 130
-    finally:
-        if quip_generator is not None:
-            quip_generator.close()
-        if cache is not None:
-            cache.close()
 
 
 if __name__ == "__main__":
